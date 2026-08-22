@@ -1,16 +1,29 @@
+# Python environments and build output
 .venv/
-.tools/
 *.egg-info/
+build/
+dist/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+.nox/
 .coverage
+.coverage.*
 htmlcov/
 
+# Local secrets
 .env
+.env.*
+!.env.example
 *.token
 *.key
+*.pem
 
+# Local tools and generated data
+.tools/
 data/raw/
 data/extracted/
 data/cache/
@@ -19,16 +32,27 @@ data/manifests/*.sqlite-*
 data/manifests/*.csv
 data/manifests/*.json
 
+# Pipeline and training output
 outputs/
 checkpoints/
 runs/
 wandb/
+mlruns/
+lightning_logs/
+*.log
 *.ckpt
 *.pt
 *.pth
 *.onnx
 
+# Model and notebook caches
 .cache/
 .huggingface/
+.ipynb_checkpoints/
+
+# Editor and operating-system files
+.vscode/
+.idea/
 Thumbs.db
+Desktop.ini
 .DS_Store

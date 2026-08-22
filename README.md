@@ -54,12 +54,24 @@ phoneme alignment, mouth-landmark analysis, evidence filtering, caching, and QA
 outputs are implemented.
 
 The current pilot contains 20 AV-Deepfake1M++ validation videos and 126 aligned
-bilabial events. Of these, 120 passed the automated evidence checks. Human
-review of the saved overlays is still in progress. These figures describe the
+bilabial events. Of these, 120 passed the automated evidence checks, and all 115
+saved minimum-closure overlays passed manual review. These figures describe the
 preprocessing pilot and are not model-performance results.
+
+A subsequent 100-video local benchmark completed without pipeline failures in
+30 minutes 15.7 seconds. It produced 654 bilabial events, retained 98 videos as
+eligible, and generated about 115.6 MiB of derived output.
 
 Model training, Isolation Forest calibration, Swin Base fusion, ablation
 experiments, and external evaluation have not yet been completed.
+
+## Next step
+
+The next milestone is a training-data interface that converts eligible,
+non-ambiguous bilabial events into fixed-length mouth sequences and numerical
+features. It will create source-group-disjoint AV++ training and validation
+manifests. After that, the Swin Base baseline will be tested by overfitting a
+very small sample before any paid cloud training.
 
 ## Scope
 
