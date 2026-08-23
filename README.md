@@ -51,7 +51,10 @@ across cross-validation folds.
 
 The data inventory, deterministic pilot sampling, selective extraction,
 phoneme alignment, mouth-landmark analysis, evidence filtering, caching, and QA
-outputs are implemented.
+outputs are implemented. The training-data interface is also implemented: it
+creates filtered, source-group-safe event manifests and loads fixed-length mouth
+clips with VILD and timing features. Its automated checks pass, and the
+100-video benchmark produced 620 usable event records.
 
 The current pilot contains 20 AV-Deepfake1M++ validation videos and 126 aligned
 bilabial events. Of these, 120 passed the automated evidence checks, and all 115
@@ -62,16 +65,13 @@ A subsequent 100-video local benchmark completed without pipeline failures in
 30 minutes 15.7 seconds. It produced 654 bilabial events, retained 98 videos as
 eligible, and generated about 115.6 MiB of derived output.
 
-Model training, Isolation Forest calibration, Swin Base fusion, ablation
+The panel-required Video Swin Base baseline is implemented. A full-size real
+mouth event completed a local GPU forward pass, and a balanced eight-event
+frozen-backbone classifier-head check deliberately overfit successfully. These
+are implementation checks, not model-performance results.
+
+Full model training, Isolation Forest calibration, feature fusion, ablation
 experiments, and external evaluation have not yet been completed.
-
-## Next step
-
-The next milestone is a training-data interface that converts eligible,
-non-ambiguous bilabial events into fixed-length mouth sequences and numerical
-features. It will create source-group-disjoint AV++ training and validation
-manifests. After that, the Swin Base baseline will be tested by overfitting a
-very small sample before any paid cloud training.
 
 ## Scope
 

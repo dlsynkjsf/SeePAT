@@ -1,0 +1,1 @@
+"""Trainable SeePAT model definitions."""

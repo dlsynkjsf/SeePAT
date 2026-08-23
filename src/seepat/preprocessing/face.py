@@ -62,6 +62,46 @@ def _velocity(delta: float, elapsed_s: float) -> float | None:
     return delta / elapsed_s
 
 
+def timestamp_to_frame(timestamp_s: float, fps: float, round_up: bool = False) -> int:
+    if fps <= 0:
+        raise ValueError("fps must be positive")
+    scaled = max(0.0, timestamp_s) * fps
+    return math.ceil(scaled) if round_up else math.floor(scaled)
+
+
+def event_frame_bounds(
+    phone_start_s: float,
+    phone_end_s: float,
+    fps: float,
+    window_before_s: float,
+    window_after_s: float,
+) -> tuple[int, int]:
+    if phone_end_s < phone_start_s:
+        raise ValueError("phone_end_s cannot precede phone_start_s")
+    if window_before_s < 0 or window_after_s < 0:
+        raise ValueError("event-window durations cannot be negative")
+
+    start_s = max(0.0, phone_start_s - window_before_s)
+    end_s = max(start_s, phone_end_s + window_after_s)
+    return (
+        timestamp_to_frame(start_s, fps),
+        timestamp_to_frame(end_s, fps, round_up=True),
+    )
+
+
+def normalized_vild(
+    upper_lip: tuple[float, float],
+    lower_lip: tuple[float, float],
+    left_corner: tuple[float, float],
+    right_corner: tuple[float, float],
+    minimum_mouth_width: float = 1.0,
+) -> float | None:
+    mouth_width = _distance(left_corner, right_corner)
+    if mouth_width <= minimum_mouth_width:
+        return None
+    return _distance(upper_lip, lower_lip) / mouth_width
+
+
 class MouthEventAnalyzer:
     def __init__(self, min_detection_confidence: float = 0.5) -> None:
         try:
@@ -112,10 +152,13 @@ class MouthEventAnalyzer:
         if not capture.isOpened():
             raise ValueError(f"OpenCV could not open {video_path}")
 
-        start_s = max(0.0, phone_start_s - window_before_s)
-        end_s = max(start_s, phone_end_s + window_after_s)
-        start_frame = max(0, math.floor(start_s * fps))
-        end_frame = max(start_frame, math.ceil(end_s * fps))
+        start_frame, end_frame = event_frame_bounds(
+            phone_start_s,
+            phone_end_s,
+            fps,
+            window_before_s,
+            window_after_s,
+        )
         capture.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
 
         mouth_clip_path.parent.mkdir(parents=True, exist_ok=True)
@@ -184,13 +227,15 @@ class MouthEventAnalyzer:
                     index: (landmarks[index].x * width, landmarks[index].y * height)
                     for index in LIP_LANDMARKS
                 }
-                mouth_width = _distance(
-                    points[LEFT_MOUTH_CORNER], points[RIGHT_MOUTH_CORNER]
+                vild = normalized_vild(
+                    points[INNER_UPPER_LIP],
+                    points[INNER_LOWER_LIP],
+                    points[LEFT_MOUTH_CORNER],
+                    points[RIGHT_MOUTH_CORNER],
                 )
-                if mouth_width <= 1.0:
+                if vild is None:
                     frame_index += 1
                     continue
-                vild = _distance(points[INNER_UPPER_LIP], points[INNER_LOWER_LIP]) / mouth_width
                 measurements.append((timestamp_s, vild))
                 valid_frames += 1
 

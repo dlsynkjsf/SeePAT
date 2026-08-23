@@ -27,6 +27,7 @@ htmlcov/
 data/raw/
 data/extracted/
 data/cache/
+data/training/
 data/manifests/*.sqlite
 data/manifests/*.sqlite-*
 data/manifests/*.csv
