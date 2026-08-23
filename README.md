@@ -70,6 +70,11 @@ mouth event completed a local GPU forward pass, and a balanced eight-event
 frozen-backbone classifier-head check deliberately overfit successfully. These
 are implementation checks, not model-performance results.
 
+The baseline training command now supports mixed precision, gradient
+accumulation, checkpoint recovery, early stopping, and video-level validation.
+Its control flow has passed automated tests with a small test model, but no real
+training experiment has been completed.
+
 Full model training, Isolation Forest calibration, feature fusion, ablation
 experiments, and external evaluation have not yet been completed.
 

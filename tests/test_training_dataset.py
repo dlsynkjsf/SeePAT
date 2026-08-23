@@ -10,6 +10,7 @@ from seepat.training.dataset import (
     MouthEventDataset,
     numeric_feature_values,
     sequence_frame_indices,
+    video_class_id,
 )
 
 
@@ -40,12 +41,23 @@ def test_numeric_feature_values_masks_missing_and_nonfinite_values() -> None:
     assert mask[FEATURE_FIELDS.index("opening_velocity")] is False
 
 
+def test_video_class_id_uses_video_manipulation_modality() -> None:
+    assert video_class_id("real") == 0
+    assert video_class_id("audio_modified") == 1
+    assert video_class_id("visual_modified") == 1
+    assert video_class_id("both_modified") == 1
+
+    with pytest.raises(ValueError, match="Unsupported manipulation modality"):
+        video_class_id("unknown")
+
+
 def test_dataset_filters_manifest_by_split_without_loading_clips(tmp_path: Path) -> None:
     manifest = tmp_path / "events.csv"
     base_row = {
         "event_id": "event-1",
         "video_id": "video-1",
         "source_group": "source-1",
+        "manipulation_modality": "real",
         "phoneme": "P",
         "class_id": "0",
         "mouth_clip_path": "clip.mp4",

@@ -19,6 +19,22 @@ FEATURE_FIELDS = (
     "phone_duration_s",
 )
 
+VIDEO_MODALITY_LABELS = {
+    "real": 0,
+    "audio_modified": 1,
+    "visual_modified": 1,
+    "both_modified": 1,
+}
+
+
+def video_class_id(manipulation_modality: str) -> int:
+    try:
+        return VIDEO_MODALITY_LABELS[manipulation_modality.strip()]
+    except KeyError as error:
+        raise ValueError(
+            f"Unsupported manipulation modality: {manipulation_modality!r}"
+        ) from error
+
 
 def sequence_frame_indices(frame_count: int, sequence_length: int) -> tuple[list[int], list[bool]]:
     if frame_count < 1:
@@ -88,6 +104,7 @@ class MouthEventDataset:
             "video_id",
             "dataset_split",
             "source_group",
+            "manipulation_modality",
             "phoneme",
             "class_id",
             "mouth_clip_path",
@@ -155,6 +172,11 @@ class MouthEventDataset:
             "event_id": row["event_id"],
             "video_id": row["video_id"],
             "source_group": row["source_group"],
+            "manipulation_modality": row["manipulation_modality"],
+            "video_label": torch.tensor(
+                video_class_id(row["manipulation_modality"]),
+                dtype=torch.long,
+            ),
             "phoneme": row["phoneme"],
         }
 
