@@ -75,6 +75,11 @@ accumulation, checkpoint recovery, early stopping, and video-level validation.
 Its control flow has passed automated tests with a small test model, but no real
 training experiment has been completed.
 
+A deterministic 1,000-video AV++ Train preprocessing canary has also been
+selected from local metadata. It is balanced across the four source
+manipulation categories, uses 1,000 distinct source groups, and excludes sources
+present in Validation. No Train videos have been downloaded or preprocessed.
+
 Full model training, Isolation Forest calibration, feature fusion, ablation
 experiments, and external evaluation have not yet been completed.
 

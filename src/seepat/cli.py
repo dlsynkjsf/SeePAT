@@ -13,7 +13,7 @@ from seepat.data.repository import (
     download_metadata,
     write_repository_audit,
 )
-from seepat.data.sampling import sample_pilot
+from seepat.data.sampling import sample_pilot, sample_training_canary
 
 DEFAULT_CATEGORIES = ("real", "audio_modified", "visual_modified", "both_modified")
 
@@ -42,6 +42,19 @@ def create_parser() -> ArgumentParser:
     sample.add_argument("--category", action="append", dest="categories")
     sample.add_argument("--per-category", type=int, default=5)
     sample.add_argument("--seed", type=int, default=20260822)
+
+    canary = commands.add_parser(
+        "sample-training-canary",
+        help="Create a deterministic, validation-safe AV++ Train canary manifest",
+    )
+    canary.add_argument("--database", type=Path, required=True)
+    canary.add_argument("--output", type=Path, required=True)
+    canary.add_argument("--summary", type=Path, required=True)
+    canary.add_argument("--split", default="train")
+    canary.add_argument("--category", action="append", dest="categories")
+    canary.add_argument("--per-category", type=int, default=250)
+    canary.add_argument("--seed", type=int, default=20260824)
+    canary.add_argument("--exclude-split", action="append", dest="excluded_splits")
 
     extract = commands.add_parser(
         "extract-pilot", help="Extract only videos named by a pilot manifest"
@@ -84,6 +97,22 @@ def main() -> None:
             seed=args.seed,
         )
         print(f"Wrote {len(rows)} rows to {args.output}")
+        return
+
+    if args.command == "sample-training-canary":
+        categories = args.categories or list(DEFAULT_CATEGORIES)
+        excluded_splits = args.excluded_splits or ["val"]
+        _, summary = sample_training_canary(
+            database_path=args.database,
+            output_path=args.output,
+            summary_path=args.summary,
+            split=args.split,
+            categories=categories,
+            per_category=args.per_category,
+            seed=args.seed,
+            excluded_splits=excluded_splits,
+        )
+        print(json.dumps(summary, indent=2))
         return
 
     if args.command == "extract-pilot":
