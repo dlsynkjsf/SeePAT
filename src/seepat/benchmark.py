@@ -81,13 +81,19 @@ def run_benchmark(
     report_path: Path | None = None,
     limit: int | None = None,
     force: bool = False,
+    retry_failed: bool = False,
 ) -> dict[str, object]:
     settings = load_pipeline_settings(config_path, PIPELINE_VERSION)
     report_path = report_path or settings.preprocessing.output_dir / "benchmark_report.json"
 
     started_at = datetime.now(UTC)
     started_counter = perf_counter()
-    summary = run_pipeline(config_path, limit=limit, force=force)
+    summary = run_pipeline(
+        config_path,
+        limit=limit,
+        force=force,
+        retry_failed=retry_failed,
+    )
     elapsed_seconds = perf_counter() - started_counter
     completed_at = datetime.now(UTC)
 
@@ -109,12 +115,14 @@ def main() -> None:
     parser.add_argument("--report", type=Path)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--retry-failed", action="store_true")
     args = parser.parse_args()
     report = run_benchmark(
         config_path=args.config,
         report_path=args.report,
         limit=args.limit,
         force=args.force,
+        retry_failed=args.retry_failed,
     )
     print(json.dumps(report, indent=2))
 

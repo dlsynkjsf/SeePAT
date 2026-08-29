@@ -6,7 +6,7 @@ from pathlib import Path
 
 from seepat.artifacts import atomic_write_json
 from seepat.config import PipelineSettings
-from seepat.preprocessing.alignment import MfaDockerAligner
+from seepat.preprocessing.alignment import MfaAlignmentError, MfaDockerAligner
 from seepat.preprocessing.eligibility import (
     event_evidence_status,
     video_evidence_status,
@@ -92,6 +92,8 @@ class PilotVideoProcessor:
         # Dataset-scale preprocessing must record a per-video failure and
         # continue. The exception type and traceback remain in the audit.
         except Exception as error:  # noqa: BLE001
+            if isinstance(error, MfaAlignmentError):
+                report["exclusion_reason"] = "alignment_failed"
             report["error_type"] = type(error).__name__
             report["error_message"] = str(error)
             report["traceback_tail"] = traceback.format_exc()[-4000:]

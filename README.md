@@ -75,10 +75,11 @@ accumulation, checkpoint recovery, early stopping, and video-level validation.
 Its control flow has passed automated tests with a small test model, but no real
 training experiment has been completed.
 
-A deterministic 1,000-video AV++ Train preprocessing canary has also been
-selected from local metadata. It is balanced across the four source
-manipulation categories, uses 1,000 distinct source groups, and excludes sources
-present in Validation. No Train videos have been downloaded or preprocessed.
+A larger source-group-safe preprocessing run is now complete. It processed
+4,906 of 5,000 selected Train videos and 975 of 1,000 selected Validation
+videos, retaining 5,779 evidence-eligible videos and 38,727 eligible bilabial
+events across both splits. These are dataset-preparation figures, not model
+performance results.
 
 Full model training, Isolation Forest calibration, feature fusion, ablation
 experiments, and external evaluation have not yet been completed.

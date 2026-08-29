@@ -42,6 +42,7 @@ def create_parser() -> ArgumentParser:
     sample.add_argument("--category", action="append", dest="categories")
     sample.add_argument("--per-category", type=int, default=5)
     sample.add_argument("--seed", type=int, default=20260822)
+    sample.add_argument("--require-complete-metadata", action="store_true")
 
     canary = commands.add_parser(
         "sample-training-canary",
@@ -95,6 +96,7 @@ def main() -> None:
             categories=categories,
             per_category=args.per_category,
             seed=args.seed,
+            require_complete_metadata=args.require_complete_metadata,
         )
         print(f"Wrote {len(rows)} rows to {args.output}")
         return

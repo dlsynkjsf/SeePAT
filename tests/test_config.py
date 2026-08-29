@@ -55,3 +55,55 @@ def test_load_pipeline_settings_rejects_invalid_ratio(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="between 0 and 1"):
         load_pipeline_settings(config_path, pipeline_version="pilot-v3")
+
+
+def test_train_canary_config_points_to_separate_inputs_and_outputs() -> None:
+    settings = load_pipeline_settings(
+        Path("configs/train_canary1000.yaml"),
+        pipeline_version="pilot-v3",
+    )
+
+    assert settings.dataset.pilot_manifest == Path(
+        "data/manifests/train_canary1000.csv"
+    )
+    assert settings.dataset.extracted_root == Path(
+        "data/extracted/avpp/train-canary1000/train"
+    )
+    assert settings.preprocessing.output_dir == Path("outputs/train-canary1000")
+
+
+@pytest.mark.parametrize(
+    ("config_name", "manifest", "extracted_root", "output_dir", "per_video_overlays"),
+    [
+        (
+            "train_subset5000.yaml",
+            "data/manifests/train_subset5000.csv",
+            "data/extracted/avpp/train-subset5000/train",
+            "outputs/train-subset5000",
+            1,
+        ),
+        (
+            "val_subset1000.yaml",
+            "data/manifests/val_subset1000.csv",
+            "data/extracted/avpp/val-subset1000/val",
+            "outputs/val-subset1000",
+            1,
+        ),
+    ],
+)
+def test_scaled_subset_configs_use_isolated_paths(
+    config_name: str,
+    manifest: str,
+    extracted_root: str,
+    output_dir: str,
+    per_video_overlays: int,
+) -> None:
+    settings = load_pipeline_settings(
+        Path("configs") / config_name,
+        pipeline_version="pilot-v3",
+    )
+
+    assert settings.dataset.pilot_manifest == Path(manifest)
+    assert settings.dataset.extracted_root == Path(extracted_root)
+    assert settings.preprocessing.output_dir == Path(output_dir)
+    assert settings.preprocessing.max_debug_overlays_per_video == per_video_overlays

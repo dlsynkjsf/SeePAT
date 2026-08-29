@@ -1,8 +1,17 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
-from seepat.preprocessing.alignment import normalize_arpa_phone, parse_mfa_json
+import pytest
+
+from seepat.preprocessing.alignment import (
+    MfaAlignmentError,
+    MfaDockerAligner,
+    ensure_docker_daemon,
+    normalize_arpa_phone,
+    parse_mfa_json,
+)
 
 
 def test_normalize_arpa_phone_removes_stress() -> None:
@@ -26,3 +35,36 @@ def test_parse_mfa_json_keeps_only_bilabials(tmp_path: Path) -> None:
             "speaker": "",
         }
     ]
+
+
+def test_align_wraps_per_video_mfa_failure(tmp_path: Path, monkeypatch) -> None:
+    aligner = object.__new__(MfaDockerAligner)
+    aligner.dictionary = "english_us_arpa"
+    aligner.acoustic_model = "english_us_arpa"
+    monkeypatch.setattr(aligner, "ensure_models", lambda: None)
+
+    def fail_alignment(*args, **kwargs) -> None:
+        raise RuntimeError("Could not align with the current beam size")
+
+    monkeypatch.setattr(aligner, "_run", fail_alignment)
+    audio_path = tmp_path / "source.wav"
+    audio_path.write_bytes(b"audio")
+
+    with pytest.raises(MfaAlignmentError, match="current beam size"):
+        aligner.align(audio_path, "test transcript", tmp_path / "alignment.json")
+
+
+def test_docker_daemon_check_explains_stopped_desktop(monkeypatch) -> None:
+    completed = SimpleNamespace(
+        returncode=1,
+        stdout="",
+        stderr="failed to connect to the docker API",
+    )
+    monkeypatch.setattr("seepat.preprocessing.alignment.shutil.which", lambda name: name)
+    monkeypatch.setattr(
+        "seepat.preprocessing.alignment.subprocess.run",
+        lambda *args, **kwargs: completed,
+    )
+
+    with pytest.raises(RuntimeError, match="Docker Desktop is not running"):
+        ensure_docker_daemon()

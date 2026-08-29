@@ -32,11 +32,19 @@ ELIGIBILITY_REPORT_FIELDS = (
 )
 
 
-def _load_cached_result(result_path: Path, signature: str) -> dict | None:
+def _load_cached_result(
+    result_path: Path,
+    signature: str,
+    retry_failed: bool = False,
+) -> dict | None:
     if not result_path.is_file():
         return None
     cached = json.loads(result_path.read_text(encoding="utf-8"))
-    return cached if cached.get("cache_signature") == signature else None
+    if cached.get("cache_signature") != signature:
+        return None
+    if retry_failed and cached.get("video_report", {}).get("pipeline_status") != "complete":
+        return None
+    return cached
 
 
 def _write_run_outputs(
@@ -78,10 +86,15 @@ def _write_run_outputs(
 
 
 def run_pipeline(
-    config_path: Path, limit: int | None = None, force: bool = False
+    config_path: Path,
+    limit: int | None = None,
+    force: bool = False,
+    retry_failed: bool = False,
 ) -> dict[str, object]:
     if limit is not None and limit < 1:
         raise ValueError("--limit must be at least 1")
+    if force and retry_failed:
+        raise ValueError("--force and --retry-failed cannot be used together")
 
     settings = load_pipeline_settings(config_path, PIPELINE_VERSION)
     preprocessing = settings.preprocessing
@@ -120,7 +133,9 @@ def run_pipeline(
             work_dir = cache_dir / video_id
             result_path = work_dir / "result.json"
             cached = None if force else _load_cached_result(
-                result_path, settings.cache_signature
+                result_path,
+                settings.cache_signature,
+                retry_failed=retry_failed,
             )
             if cached is not None:
                 video_reports.append(cached["video_report"])
@@ -159,8 +174,14 @@ def main() -> None:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--retry-failed", action="store_true")
     args = parser.parse_args()
-    summary = run_pipeline(args.config, limit=args.limit, force=args.force)
+    summary = run_pipeline(
+        args.config,
+        limit=args.limit,
+        force=args.force,
+        retry_failed=args.retry_failed,
+    )
     print(json.dumps(summary, indent=2))
 
 

@@ -60,6 +60,7 @@ def sample_pilot(
     categories: Sequence[str],
     per_category: int,
     seed: int,
+    require_complete_metadata: bool = False,
 ) -> list[dict[str, object]]:
     if not database_path.is_file():
         raise FileNotFoundError(f"Inventory database not found: {database_path}")
@@ -88,6 +89,10 @@ def sample_pilot(
             rng.shuffle(candidates)
             category_rows: list[dict[str, object]] = []
             for candidate in candidates:
+                if require_complete_metadata and (
+                    _canary_metadata_omission_reason(candidate, category) is not None
+                ):
+                    continue
                 group_key = str(candidate["original"] or candidate["file"])
                 if group_key in used_originals:
                     continue

@@ -49,6 +49,39 @@ def read_manifest_video_paths(manifest_path: Path) -> list[str]:
     return unique_paths
 
 
+def run_visible_command(command: list[str]) -> tuple[int, str]:
+    """Run a long command visibly while retaining a short diagnostic tail."""
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    if process.stdout is None:
+        process.kill()
+        process.wait()
+        raise RuntimeError("Could not capture the child process output")
+
+    output_tail = ""
+    try:
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            output_tail = (output_tail + line)[-4000:]
+        return_code = process.wait()
+    except KeyboardInterrupt:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        raise
+    finally:
+        process.stdout.close()
+    return return_code, output_tail
+
+
 def extract_manifest_videos(
     archive_first_volume: Path,
     manifest_path: Path,
@@ -73,6 +106,12 @@ def extract_manifest_videos(
     output_dir.mkdir(parents=True, exist_ok=True)
     report_path.parent.mkdir(parents=True, exist_ok=True)
 
+    print(
+        f"Starting selective extraction of {len(video_paths)} files. "
+        "7-Zip output will appear below.",
+        flush=True,
+    )
+
     with tempfile.TemporaryDirectory(prefix="seepat-7z-") as temporary_dir:
         include_path = Path(temporary_dir) / "include.txt"
         include_path.write_text("\n".join(archive_paths) + "\n", encoding="utf-8")
@@ -85,7 +124,7 @@ def extract_manifest_videos(
             "-y",
             "-aoa",
         ]
-        completed = subprocess.run(command, check=False, text=True, capture_output=True)
+        return_code, output_tail = run_visible_command(command)
 
     extracted_root = output_dir / archive_root if archive_root else output_dir
     missing = [item for item in video_paths if not (extracted_root / Path(item)).is_file()]
@@ -104,15 +143,14 @@ def extract_manifest_videos(
         "extracted_files": len(video_paths) - len(missing),
         "extracted_bytes": extracted_bytes,
         "missing_files": missing,
-        "seven_zip_exit_code": completed.returncode,
-        "seven_zip_stdout_tail": completed.stdout[-4000:],
-        "seven_zip_stderr_tail": completed.stderr[-4000:],
+        "seven_zip_exit_code": return_code,
+        "seven_zip_output_tail": output_tail,
     }
     report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
 
-    if completed.returncode != 0:
+    if return_code != 0:
         raise RuntimeError(
-            f"7-Zip extraction failed with exit code {completed.returncode}. "
+            f"7-Zip extraction failed with exit code {return_code}. "
             f"See {report_path}."
         )
     if missing:

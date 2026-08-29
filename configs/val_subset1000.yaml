@@ -1,0 +1,39 @@
+project:
+  seed: 20260822
+
+dataset:
+  repo_id: ControlNet/AV-Deepfake1M-PlusPlus
+  split: val
+  metadata:
+    - data/raw/avpp/train_metadata.json
+    - data/raw/avpp/val_metadata.json
+  inventory_database: data/manifests/avpp_inventory.sqlite
+  pilot_manifest: data/manifests/val_subset1000.csv
+  extracted_root: data/extracted/avpp/val-subset1000/val
+
+sampling:
+  per_category: 250
+  categories:
+    - real
+    - audio_modified
+    - visual_modified
+    - both_modified
+  require_unique_originals: true
+
+preprocessing:
+  output_dir: outputs/val-subset1000
+  ffmpeg_path: null
+  ffprobe_path: null
+  whisper_model: base.en
+  whisper_device: cpu
+  whisper_compute_type: int8
+  mfa_docker_image: mmcauliffe/montreal-forced-aligner:latest
+  mfa_dictionary: english_us_arpa
+  mfa_acoustic_model: english_us_arpa
+  mfa_cache_dir: data/cache/mfa
+  event_window_before_s: 0.20
+  event_window_after_s: 0.20
+  manipulation_boundary_tolerance_s: 0.04
+  min_valid_landmark_ratio: 0.80
+  min_bilabial_events: 1
+  max_debug_overlays_per_video: 1

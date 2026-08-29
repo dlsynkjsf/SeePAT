@@ -70,6 +70,42 @@ def test_inventory_and_sampling_are_deterministic(tmp_path: Path) -> None:
     assert [row["selection_order"] for row in first] == list(range(8))
 
 
+def test_pilot_sampler_can_require_complete_metadata(tmp_path: Path) -> None:
+    metadata_path = tmp_path / "metadata.json"
+    database_path = tmp_path / "inventory.sqlite"
+    summary_path = tmp_path / "summary.json"
+    manifest_path = tmp_path / "complete.csv"
+    rows = [
+        {
+            "file": f"val/source-{index}/real.mp4",
+            "original": f"val/source-{index}/real.mp4",
+            "split": "val",
+            "modify_type": "real",
+            "fake_segments": [],
+            "audio_fake_segments": [],
+            "visual_fake_segments": [],
+            "video_frames": 100,
+            "audio_frames": 0 if index == 0 else 64_000,
+        }
+        for index in range(4)
+    ]
+    metadata_path.write_text(json.dumps(rows), encoding="utf-8")
+    build_inventory([metadata_path], database_path, summary_path)
+
+    selected = sample_pilot(
+        database_path=database_path,
+        output_path=manifest_path,
+        split="val",
+        categories=("real",),
+        per_category=3,
+        seed=123,
+        require_complete_metadata=True,
+    )
+
+    assert len(selected) == 3
+    assert all(int(row["audio_frames"]) > 0 for row in selected)
+
+
 def test_canonical_source_group_normalizes_dataset_paths() -> None:
     assert (
         canonical_source_group(

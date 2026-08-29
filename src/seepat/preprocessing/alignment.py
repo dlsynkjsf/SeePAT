@@ -9,6 +9,28 @@ from pathlib import Path
 BILABIAL_PHONES = frozenset({"P", "B", "M"})
 
 
+class MfaAlignmentError(RuntimeError):
+    """Raised when MFA cannot produce a usable alignment for one video."""
+
+
+def ensure_docker_daemon() -> None:
+    """Fail before a batch when Docker is installed but its daemon is stopped."""
+    if shutil.which("docker") is None:
+        raise FileNotFoundError("Docker is required for the MFA alignment container")
+    completed = subprocess.run(
+        ["docker", "info", "--format", "{{.ServerVersion}}"],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        details = (completed.stdout + "\n" + completed.stderr).strip()
+        raise RuntimeError(
+            "Docker Desktop is not running. Start it before preprocessing."
+            + (f"\n{details}" if details else "")
+        )
+
+
 def normalize_arpa_phone(label: str) -> str:
     return re.sub(r"\d+$", "", label.strip().upper())
 
@@ -49,8 +71,7 @@ class MfaDockerAligner:
         dictionary: str,
         acoustic_model: str,
     ) -> None:
-        if shutil.which("docker") is None:
-            raise FileNotFoundError("Docker is required for the MFA alignment container")
+        ensure_docker_daemon()
         self.image = image
         self.cache_dir = cache_dir.resolve()
         self.dictionary = dictionary
@@ -108,20 +129,25 @@ class MfaDockerAligner:
         transcript_path = work_dir / "transcript.txt"
         transcript_path.write_text(transcript.strip() + "\n", encoding="utf-8")
 
-        self._run(
-            [
-                "mfa",
-                "align_one",
-                "/data/audio.wav",
-                "/data/transcript.txt",
-                self.dictionary,
-                self.acoustic_model,
-                f"/data/{output_path.name}",
-                "--output_format",
-                "json",
-            ],
-            data_dir=work_dir,
-        )
-        if not output_path.is_file():
-            raise FileNotFoundError(f"MFA did not create expected output: {output_path}")
-        return parse_mfa_json(output_path)
+        try:
+            self._run(
+                [
+                    "mfa",
+                    "align_one",
+                    "/data/audio.wav",
+                    "/data/transcript.txt",
+                    self.dictionary,
+                    self.acoustic_model,
+                    f"/data/{output_path.name}",
+                    "--output_format",
+                    "json",
+                ],
+                data_dir=work_dir,
+            )
+            if not output_path.is_file():
+                raise FileNotFoundError(
+                    f"MFA did not create expected output: {output_path}"
+                )
+            return parse_mfa_json(output_path)
+        except (RuntimeError, FileNotFoundError, ValueError) as error:
+            raise MfaAlignmentError(str(error)) from error
