@@ -21,10 +21,15 @@ dev = [
 ]
 preprocess = [
   "faster-whisper>=1.1,<2",
-  # 0.10.21 is the final Windows build with the audited FaceMesh Solutions API.
+  # Last Windows release with the FaceMesh Solutions API used by this project.
   "mediapipe==0.10.21",
   "numpy>=1.26,<3",
   "Pillow>=10,<13",
+]
+audio = [
+  "demucs==4.1.0",
+  "deepfilternet==0.5.6",
+  "torchaudio==2.12.1",
 ]
 train = [
   "numpy>=1.26,<3",
@@ -35,6 +40,7 @@ train = [
 
 [project.scripts]
 seepat-data = "seepat.cli:main"
+seepat-workflow = "seepat.workflow:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

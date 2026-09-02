@@ -123,9 +123,13 @@ class MfaDockerAligner:
         self.ensure_models()
         work_dir = output_path.parent.resolve()
         work_dir.mkdir(parents=True, exist_ok=True)
-        mounted_audio = work_dir / "audio.wav"
-        if audio_path.resolve() != mounted_audio:
-            shutil.copy2(audio_path, mounted_audio)
+        resolved_audio = audio_path.resolve()
+        try:
+            relative_audio = resolved_audio.relative_to(work_dir)
+        except ValueError:
+            copied_audio = work_dir / "mfa_audio.wav"
+            shutil.copy2(resolved_audio, copied_audio)
+            relative_audio = copied_audio.relative_to(work_dir)
         transcript_path = work_dir / "transcript.txt"
         transcript_path.write_text(transcript.strip() + "\n", encoding="utf-8")
 
@@ -134,7 +138,7 @@ class MfaDockerAligner:
                 [
                     "mfa",
                     "align_one",
-                    "/data/audio.wav",
+                    f"/data/{relative_audio.as_posix()}",
                     "/data/transcript.txt",
                     self.dictionary,
                     self.acoustic_model,

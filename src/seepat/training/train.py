@@ -6,6 +6,7 @@ import json
 import random
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from itertools import islice
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -23,6 +24,8 @@ from seepat.training.metrics import (
     binary_classification_metrics,
 )
 
+TRAINING_VERSION = "swin-baseline-v1"
+
 
 @dataclass(frozen=True)
 class TrainingOptions:
@@ -39,6 +42,8 @@ class TrainingOptions:
     freeze_backbone: bool = False
     class_weighting: str = "balanced"
     early_stopping_patience: int = 3
+    max_train_batches: int | None = None
+    max_validation_batches: int | None = None
 
     def validate(self) -> None:
         integer_values = {
@@ -61,6 +66,13 @@ class TrainingOptions:
             raise ValueError("weight_decay must not be negative")
         if self.class_weighting not in {"balanced", "none"}:
             raise ValueError("class_weighting must be 'balanced' or 'none'")
+        batch_limits = (self.max_train_batches, self.max_validation_batches)
+        if (batch_limits[0] is None) != (batch_limits[1] is None):
+            raise ValueError(
+                "max_train_batches and max_validation_batches must be set together"
+            )
+        if any(value is not None and value < 1 for value in batch_limits):
+            raise ValueError("Preflight batch limits must be positive")
 
 
 def source_group_overlap(
@@ -123,6 +135,7 @@ def _evaluate(
     loss_function: nn.Module,
     device: torch.device,
     amp_enabled: bool,
+    max_batches: int | None = None,
 ) -> dict[str, object]:
     model.eval()
     loss_sum = 0.0
@@ -131,9 +144,10 @@ def _evaluate(
     event_probabilities: list[float] = []
     video_ids: list[str] = []
     video_labels: list[int] = []
+    batch_count = min(len(loader), max_batches) if max_batches is not None else len(loader)
 
     with torch.inference_mode():
-        for batch in loader:
+        for batch in islice(loader, batch_count):
             videos = batch["video"].to(device, non_blocking=True)
             labels = batch["label"].to(device, non_blocking=True)
             with torch.autocast(
@@ -158,6 +172,8 @@ def _evaluate(
     )
     return {
         "loss": loss_sum / event_count,
+        "batches": batch_count,
+        "events_processed": event_count,
         "events": binary_classification_metrics(event_labels, event_probabilities),
         "videos": binary_classification_metrics(
             aggregated_labels,
@@ -255,6 +271,10 @@ def train_model(
             "metric": "validation_video_f1",
             "early_stopping_patience": options.early_stopping_patience,
         },
+        "batch_limits": {
+            "train": options.max_train_batches,
+            "validation": options.max_validation_batches,
+        },
     }
 
     _seed_everything(options.seed)
@@ -269,6 +289,8 @@ def train_model(
     )
     amp_enabled = options.amp and device.type == "cuda"
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
     class_weights = (
         _balanced_class_weights(train_rows, device)
         if options.class_weighting == "balanced"
@@ -309,8 +331,23 @@ def train_model(
     started = perf_counter()
     last_completed_epoch = start_epoch - 1
     stopped_early = False
+    limited_run = options.max_train_batches is not None
+    train_batches_per_epoch = (len(train_dataset) + options.batch_size - 1) // options.batch_size
+    validation_batches_per_epoch = (
+        len(validation_dataset) + options.batch_size - 1
+    ) // options.batch_size
+    if options.max_train_batches is not None:
+        train_batches_per_epoch = min(train_batches_per_epoch, options.max_train_batches)
+    if options.max_validation_batches is not None:
+        validation_batches_per_epoch = min(
+            validation_batches_per_epoch,
+            options.max_validation_batches,
+        )
+    processed_train_events = 0
+    processed_validation_events = 0
     run_record: dict[str, object] = {
         "status": "running",
+        "run_type": "engineering_preflight" if limited_run else "training_experiment",
         "started_at_utc": started_at,
         "device": str(device),
         "amp_requested": options.amp,
@@ -326,6 +363,8 @@ def train_model(
             "validation_source_groups": len(
                 {row["source_group"] for row in validation_rows}
             ),
+            "train_batches_per_epoch": train_batches_per_epoch,
+            "validation_batches_per_epoch": validation_batches_per_epoch,
         },
         "class_weights": class_weights.cpu().tolist() if class_weights is not None else None,
         "environment": {
@@ -335,6 +374,12 @@ def train_model(
         },
     }
     atomic_write_json(output_dir / "run.json", run_record)
+    if limited_run:
+        print(
+            "Engineering preflight: "
+            f"{train_batches_per_epoch} Train batches and "
+            f"{validation_batches_per_epoch} Validation batches per epoch"
+        )
 
     try:
         validation_loader = _loader(
@@ -363,7 +408,10 @@ def train_model(
             train_labels: list[int] = []
             train_probabilities: list[float] = []
 
-            for batch_index, batch in enumerate(train_loader, start=1):
+            for batch_index, batch in enumerate(
+                islice(train_loader, train_batches_per_epoch),
+                start=1,
+            ):
                 videos = batch["video"].to(device, non_blocking=True)
                 labels = batch["label"].to(device, non_blocking=True)
                 with torch.autocast(
@@ -375,7 +423,7 @@ def train_model(
                     batch_loss = loss_function(logits, labels)
                     backward_loss = batch_loss / options.gradient_accumulation_steps
                 scaler.scale(backward_loss).backward()
-                final_batch = batch_index == len(train_loader)
+                final_batch = batch_index == train_batches_per_epoch
                 if (
                     batch_index % options.gradient_accumulation_steps == 0
                     or final_batch
@@ -392,6 +440,7 @@ def train_model(
                 train_probabilities.extend(
                     F.softmax(logits.detach().float(), dim=1)[:, 1].cpu().tolist()
                 )
+            processed_train_events += event_count
 
             validation = _evaluate(
                 model,
@@ -399,13 +448,17 @@ def train_model(
                 loss_function,
                 device,
                 amp_enabled,
+                max_batches=options.max_validation_batches,
             )
+            processed_validation_events += int(validation["events_processed"])
             epoch_record: dict[str, object] = {
                 "epoch": epoch,
                 "global_step": global_step,
                 "learning_rate": optimizer.param_groups[0]["lr"],
                 "train": {
                     "loss": loss_sum / event_count,
+                    "batches": train_batches_per_epoch,
+                    "events_processed": event_count,
                     "events": binary_classification_metrics(
                         train_labels,
                         train_probabilities,
@@ -414,6 +467,12 @@ def train_model(
                 "validation": validation,
             }
             history.append(epoch_record)
+            if limited_run:
+                print(
+                    f"Epoch {epoch}/{options.epochs}: "
+                    f"{train_batches_per_epoch} Train batches and "
+                    f"{validation['batches']} Validation batches complete"
+                )
             current_video_f1 = float(validation["videos"]["f1"])  # type: ignore[index]
             improved = current_video_f1 > best_video_f1
             if improved:
@@ -472,6 +531,7 @@ def train_model(
         raise
 
     elapsed_seconds = perf_counter() - started
+    processed_events = processed_train_events + processed_validation_events
     run_record.update(
         {
             "status": "complete",
@@ -483,6 +543,14 @@ def train_model(
             "global_step": global_step,
             "best_epoch": best_epoch,
             "best_validation_video_f1": best_video_f1,
+            "processed_train_events": processed_train_events,
+            "processed_validation_events": processed_validation_events,
+            "processed_events_per_second": (
+                round(processed_events / elapsed_seconds, 6) if elapsed_seconds else None
+            ),
+            "peak_cuda_memory_bytes": (
+                torch.cuda.max_memory_allocated(device) if device.type == "cuda" else None
+            ),
             "history": (output_dir / "history.json").as_posix(),
             "last_checkpoint": (output_dir / "checkpoint_last.pt").as_posix(),
             "best_checkpoint": (output_dir / "checkpoint_best.pt").as_posix(),
@@ -508,6 +576,59 @@ def _device(name: str) -> torch.device:
     return torch.device(name)
 
 
+def train_from_manifests(
+    train_manifest: Path,
+    validation_manifest: Path,
+    output_dir: Path,
+    project_root: Path,
+    options: TrainingOptions,
+    device_name: str,
+    pretrained: bool,
+    resume_from: Path | None = None,
+) -> dict[str, object]:
+    device = _device(device_name)
+    torch.hub.set_dir(str(project_root / ".cache" / "torch"))
+    train_dataset = MouthEventDataset(
+        manifest_path=train_manifest,
+        project_root=project_root,
+        dataset_split="train",
+        sequence_length=options.sequence_length,
+        image_size=options.image_size,
+    )
+    validation_dataset = MouthEventDataset(
+        manifest_path=validation_manifest,
+        project_root=project_root,
+        dataset_split="val",
+        sequence_length=options.sequence_length,
+        image_size=options.image_size,
+    )
+    resume_contract = {
+        "training_version": TRAINING_VERSION,
+        "model": "torchvision.swin3d_b",
+        "pretrained": pretrained,
+        "freeze_backbone": options.freeze_backbone,
+        "sequence_length": options.sequence_length,
+        "image_size": options.image_size,
+        "class_weighting": options.class_weighting,
+        "train_manifest_sha256": _sha256(train_manifest),
+        "validation_manifest_sha256": _sha256(validation_manifest),
+    }
+    model = SwinBaseEventClassifier(
+        pretrained=pretrained and resume_from is None,
+        freeze_backbone=options.freeze_backbone,
+    )
+    return train_model(
+        model=model,
+        train_dataset=train_dataset,
+        validation_dataset=validation_dataset,
+        output_dir=output_dir,
+        options=options,
+        device=device,
+        resume_contract=resume_contract,
+        resume_from=resume_from,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m seepat.training.train")
     parser.add_argument("--train-manifest", type=Path, required=True)
@@ -526,6 +647,16 @@ def main() -> None:
     parser.add_argument("--image-size", type=int, default=224)
     parser.add_argument("--seed", type=int, default=20260823)
     parser.add_argument("--early-stopping-patience", type=int, default=3)
+    parser.add_argument(
+        "--max-train-batches",
+        type=int,
+        help="Limit Train batches per epoch and mark the run as a preflight",
+    )
+    parser.add_argument(
+        "--max-val-batches",
+        type=int,
+        help="Limit Validation batches per epoch and mark the run as a preflight",
+    )
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
         "--pretrained",
@@ -558,45 +689,17 @@ def main() -> None:
         freeze_backbone=args.freeze_backbone,
         class_weighting=args.class_weighting,
         early_stopping_patience=args.early_stopping_patience,
+        max_train_batches=args.max_train_batches,
+        max_validation_batches=args.max_val_batches,
     )
-    device = _device(args.device)
-    torch.hub.set_dir(str(args.project_root / ".cache" / "torch"))
-    train_dataset = MouthEventDataset(
-        manifest_path=args.train_manifest,
-        project_root=args.project_root,
-        dataset_split="train",
-        sequence_length=options.sequence_length,
-        image_size=options.image_size,
-    )
-    validation_dataset = MouthEventDataset(
-        manifest_path=args.val_manifest,
-        project_root=args.project_root,
-        dataset_split="val",
-        sequence_length=options.sequence_length,
-        image_size=options.image_size,
-    )
-    resume_contract = {
-        "model": "torchvision.swin3d_b",
-        "pretrained": args.pretrained,
-        "freeze_backbone": options.freeze_backbone,
-        "sequence_length": options.sequence_length,
-        "image_size": options.image_size,
-        "class_weighting": options.class_weighting,
-        "train_manifest_sha256": _sha256(args.train_manifest),
-        "validation_manifest_sha256": _sha256(args.val_manifest),
-    }
-    model = SwinBaseEventClassifier(
-        pretrained=args.pretrained and args.resume_from is None,
-        freeze_backbone=options.freeze_backbone,
-    )
-    report = train_model(
-        model=model,
-        train_dataset=train_dataset,
-        validation_dataset=validation_dataset,
+    report = train_from_manifests(
+        train_manifest=args.train_manifest,
+        validation_manifest=args.val_manifest,
         output_dir=args.output_dir,
+        project_root=args.project_root,
         options=options,
-        device=device,
-        resume_contract=resume_contract,
+        device_name=args.device,
+        pretrained=args.pretrained,
         resume_from=args.resume_from,
     )
     print(json.dumps(report, indent=2))

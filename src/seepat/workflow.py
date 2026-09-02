@@ -1,0 +1,424 @@
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+from collections import Counter
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from seepat.artifacts import atomic_write_json, read_csv_rows, stable_id
+from seepat.config import PipelineSettings, load_pipeline_settings
+from seepat.pipeline import PIPELINE_VERSION, run_pipeline
+from seepat.training.manifest import prepare_training_manifests
+
+WORKFLOW_VERSION = "local-pipeline-v1"
+
+
+@dataclass(frozen=True)
+class WorkflowJob:
+    name: str
+    pipeline_config: Path
+    manifest_output_dir: Path
+
+
+@dataclass(frozen=True)
+class ModelTrainingJob:
+    name: str
+    train_manifest: Path
+    validation_manifest: Path
+    output_dir: Path
+    project_root: Path
+    device: str
+    pretrained: bool
+    options: dict[str, object]
+
+
+@dataclass(frozen=True)
+class WorkflowSettings:
+    jobs: tuple[WorkflowJob, ...]
+    model_training: ModelTrainingJob | None
+    report_path: Path
+
+
+def _require_mapping(value: object, description: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise TypeError(f"{description} must be a YAML mapping")
+    return value
+
+
+def load_workflow_settings(path: Path) -> WorkflowSettings:
+    with path.open(encoding="utf-8") as stream:
+        raw = yaml.safe_load(stream)
+    config = _require_mapping(raw, "Workflow configuration")
+
+    raw_jobs = config.get("jobs")
+    if not isinstance(raw_jobs, list) or not raw_jobs:
+        raise ValueError("Workflow configuration must contain at least one job")
+
+    jobs: list[WorkflowJob] = []
+    names: set[str] = set()
+    for index, raw_job in enumerate(raw_jobs, start=1):
+        job = _require_mapping(raw_job, f"Workflow job {index}")
+        name = str(job.get("name", "")).strip()
+        if not name:
+            raise ValueError(f"Workflow job {index} has no name")
+        if name in names:
+            raise ValueError(f"Duplicate workflow job name: {name}")
+        names.add(name)
+        try:
+            pipeline_config = Path(str(job["pipeline_config"]))
+            manifest_output_dir = Path(str(job["manifest_output_dir"]))
+        except KeyError as error:
+            raise ValueError(
+                f"Workflow job {name!r} is missing {error.args[0]!r}"
+            ) from error
+        jobs.append(
+            WorkflowJob(
+                name=name,
+                pipeline_config=pipeline_config,
+                manifest_output_dir=manifest_output_dir,
+            )
+        )
+
+    raw_training = config.get("model_training")
+    model_training = None
+    if raw_training is not None:
+        training = _require_mapping(raw_training, "Model training configuration")
+        options = _require_mapping(training.get("options", {}), "Model training options")
+        pretrained = training.get("pretrained", True)
+        if not isinstance(pretrained, bool):
+            raise TypeError("Model training pretrained value must be true or false")
+        device = str(training.get("device", "auto"))
+        if device not in {"auto", "cpu", "cuda"}:
+            raise ValueError("Model training device must be auto, cpu, or cuda")
+        try:
+            model_training = ModelTrainingJob(
+                name=str(training.get("name", "model-training")).strip(),
+                train_manifest=Path(str(training["train_manifest"])),
+                validation_manifest=Path(str(training["validation_manifest"])),
+                output_dir=Path(str(training["output_dir"])),
+                project_root=Path(str(training.get("project_root", "."))),
+                device=device,
+                pretrained=pretrained,
+                options={str(key): value for key, value in options.items()},
+            )
+        except KeyError as error:
+            raise ValueError(
+                f"Model training configuration is missing {error.args[0]!r}"
+            ) from error
+        if not model_training.name:
+            raise ValueError("Model training configuration has no name")
+
+    report_path = Path(str(config.get("report", "outputs/workflow_summary.json")))
+    return WorkflowSettings(
+        jobs=tuple(jobs),
+        model_training=model_training,
+        report_path=report_path,
+    )
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    value = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(value, dict):
+        raise TypeError(f"Expected a JSON object in {path}")
+    return value
+
+
+def _sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(chunk_size):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def preprocessing_outputs_are_current(
+    settings: PipelineSettings,
+) -> bool:
+    output_dir = settings.preprocessing.output_dir
+    summary_path = output_dir / "run_summary.json"
+    video_manifest_path = output_dir / "video_manifest.csv"
+    required_paths = (
+        summary_path,
+        video_manifest_path,
+        output_dir / "bilabial_events.csv",
+        output_dir / "eligibility_report.csv",
+    )
+    if not all(path.is_file() for path in required_paths):
+        return False
+
+    try:
+        source_rows = read_csv_rows(settings.dataset.pilot_manifest)
+        video_rows = read_csv_rows(video_manifest_path)
+        summary = _read_json(summary_path)
+        source_files = Counter(row["file"] for row in source_rows)
+        output_files = Counter(row["file"] for row in video_rows)
+        expected_ids = Counter(stable_id(row["file"]) for row in source_rows)
+        output_ids = Counter(row["video_id"] for row in video_rows)
+        return (
+            summary.get("pipeline_version") == PIPELINE_VERSION
+            and summary.get("cache_signature") == settings.cache_signature
+            and summary.get("videos_requested") == len(source_rows)
+            and len(video_rows) == len(source_rows)
+            and source_files == output_files
+            and expected_ids == output_ids
+        )
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def training_outputs_are_current(
+    settings: PipelineSettings,
+    output_dir: Path,
+) -> bool:
+    if not settings.dataset.split:
+        return False
+    preprocessing_dir = settings.preprocessing.output_dir
+    inputs = {
+        "source_manifest": settings.dataset.pilot_manifest,
+        "video_manifest": preprocessing_dir / "video_manifest.csv",
+        "event_manifest": preprocessing_dir / "bilabial_events.csv",
+    }
+    summary_path = output_dir / "summary.json"
+    if not summary_path.is_file() or not all(path.is_file() for path in inputs.values()):
+        return False
+
+    try:
+        summary = _read_json(summary_path)
+        recorded_inputs = _require_mapping(
+            summary.get("input_artifacts"), "Training input artifacts"
+        )
+        for name, path in inputs.items():
+            recorded = _require_mapping(recorded_inputs.get(name), f"Recorded {name}")
+            if recorded.get("sha256") != _sha256(path):
+                return False
+
+        combined_path = output_dir / "events.csv"
+        if (
+            not combined_path.is_file()
+            or summary.get("combined_manifest_sha256") != _sha256(combined_path)
+        ):
+            return False
+
+        split_hashes = _require_mapping(
+            summary.get("split_manifest_sha256"), "Split manifest hashes"
+        )
+        split_paths = _require_mapping(summary.get("split_manifests"), "Split manifests")
+        if settings.dataset.split not in split_paths:
+            return False
+        for split, recorded_path in split_paths.items():
+            path = Path(str(recorded_path))
+            if not path.is_file() or split_hashes.get(split) != _sha256(path):
+                return False
+
+        expected_split_path = output_dir / f"events_{settings.dataset.split}.csv"
+        return expected_split_path.is_file()
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def run_workflow_job(
+    job: WorkflowJob,
+    retry_failed: bool = False,
+) -> dict[str, object]:
+    settings = load_pipeline_settings(job.pipeline_config, PIPELINE_VERSION)
+    preprocessing_current = preprocessing_outputs_are_current(settings)
+
+    if preprocessing_current and not retry_failed:
+        print(f"[{job.name}] preprocessing: skipped (artifacts are current)")
+        pipeline_summary = _read_json(
+            settings.preprocessing.output_dir / "run_summary.json"
+        )
+        preprocessing_action = "skipped"
+    else:
+        reason = "retrying cached failures" if retry_failed else "artifacts are missing or stale"
+        print(f"[{job.name}] preprocessing: running ({reason})")
+        pipeline_summary = run_pipeline(
+            job.pipeline_config,
+            retry_failed=retry_failed,
+        )
+        preprocessing_action = "ran"
+
+    manifest_current = training_outputs_are_current(settings, job.manifest_output_dir)
+    if manifest_current:
+        print(f"[{job.name}] training manifest: skipped (artifacts are current)")
+        manifest_summary = _read_json(job.manifest_output_dir / "summary.json")
+        manifest_action = "skipped"
+    else:
+        print(f"[{job.name}] training manifest: building")
+        manifest_summary = prepare_training_manifests(
+            source_manifest_path=settings.dataset.pilot_manifest,
+            video_manifest_path=settings.preprocessing.output_dir / "video_manifest.csv",
+            event_manifest_path=settings.preprocessing.output_dir / "bilabial_events.csv",
+            output_dir=job.manifest_output_dir,
+        )
+        manifest_action = "built"
+
+    return {
+        "name": job.name,
+        "pipeline_config": job.pipeline_config.as_posix(),
+        "preprocessing": {
+            "action": preprocessing_action,
+            "summary": pipeline_summary,
+        },
+        "training_manifest": {
+            "action": manifest_action,
+            "summary": manifest_summary,
+        },
+    }
+
+
+def _model_training_options(job: ModelTrainingJob):
+    from seepat.training.train import TrainingOptions
+
+    options = TrainingOptions(**job.options)
+    options.validate()
+    return options
+
+
+def _model_training_configuration_matches(
+    job: ModelTrainingJob,
+    run_record: dict[str, Any],
+) -> bool:
+    from seepat.training.train import TRAINING_VERSION
+
+    try:
+        options = _model_training_options(job)
+        contract = _require_mapping(run_record.get("resume_contract"), "Resume contract")
+        expected_type = (
+            "engineering_preflight"
+            if options.max_train_batches is not None
+            else "training_experiment"
+        )
+        recorded_options = dict(
+            _require_mapping(run_record.get("options"), "Recorded training options")
+        )
+        expected_options = asdict(options)
+        recorded_options.pop("epochs", None)
+        expected_options.pop("epochs")
+        if job.device != "auto" and run_record.get("device") != job.device:
+            return False
+        return (
+            run_record.get("run_type") == expected_type
+            and recorded_options == expected_options
+            and contract.get("training_version") == TRAINING_VERSION
+            and contract.get("model") == "torchvision.swin3d_b"
+            and contract.get("pretrained") == job.pretrained
+            and contract.get("train_manifest_sha256") == _sha256(job.train_manifest)
+            and contract.get("validation_manifest_sha256")
+            == _sha256(job.validation_manifest)
+        )
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def model_training_outputs_are_current(job: ModelTrainingJob) -> bool:
+    required_paths = (
+        job.train_manifest,
+        job.validation_manifest,
+        job.output_dir / "run.json",
+        job.output_dir / "history.json",
+        job.output_dir / "checkpoint_last.pt",
+        job.output_dir / "checkpoint_best.pt",
+    )
+    if not all(path.is_file() for path in required_paths):
+        return False
+    try:
+        run_record = _read_json(job.output_dir / "run.json")
+        options = _model_training_options(job)
+        completed_epochs = int(run_record.get("completed_epochs", 0))
+        completed_as_planned = completed_epochs == options.epochs or (
+            run_record.get("stopped_early") is True
+            and 0 < completed_epochs <= options.epochs
+        )
+        return (
+            run_record.get("status") == "complete"
+            and completed_as_planned
+            and _model_training_configuration_matches(job, run_record)
+        )
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def _run_model_training(
+    job: ModelTrainingJob,
+    resume_from: Path | None,
+) -> dict[str, object]:
+    from seepat.training.train import train_from_manifests
+
+    return train_from_manifests(
+        train_manifest=job.train_manifest,
+        validation_manifest=job.validation_manifest,
+        output_dir=job.output_dir,
+        project_root=job.project_root,
+        options=_model_training_options(job),
+        device_name=job.device,
+        pretrained=job.pretrained,
+        resume_from=resume_from,
+    )
+
+
+def run_model_training_job(job: ModelTrainingJob) -> dict[str, object]:
+    if model_training_outputs_are_current(job):
+        print(f"[{job.name}] model training: skipped (artifacts are current)")
+        return {
+            "name": job.name,
+            "action": "skipped",
+            "summary": _read_json(job.output_dir / "run.json"),
+        }
+
+    run_path = job.output_dir / "run.json"
+    checkpoint_path = job.output_dir / "checkpoint_last.pt"
+    resume_from = None
+    if run_path.is_file():
+        previous_run = _read_json(run_path)
+        if not _model_training_configuration_matches(job, previous_run):
+            raise RuntimeError(
+                f"[{job.name}] existing training output does not match the workflow config; "
+                "use a new output directory"
+            )
+        if checkpoint_path.is_file():
+            resume_from = checkpoint_path
+
+    action = "resumed" if resume_from is not None else "ran"
+    print(f"[{job.name}] model training: {action}")
+    summary = _run_model_training(job, resume_from)
+    return {"name": job.name, "action": action, "summary": summary}
+
+
+def run_workflow(
+    config_path: Path,
+    retry_failed: bool = False,
+) -> dict[str, object]:
+    settings = load_workflow_settings(config_path)
+    jobs = [run_workflow_job(job, retry_failed=retry_failed) for job in settings.jobs]
+    report: dict[str, object] = {
+        "workflow_version": WORKFLOW_VERSION,
+        "config": config_path.as_posix(),
+        "jobs": jobs,
+    }
+    if settings.model_training is not None:
+        report["model_training"] = run_model_training_job(settings.model_training)
+    atomic_write_json(settings.report_path, report)
+    return report
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(prog="python -m seepat.workflow")
+    parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="Retry cached preprocessing failures while reusing completed work",
+    )
+    args = parser.parse_args()
+    report = run_workflow(args.config, retry_failed=args.retry_failed)
+    print(json.dumps(report, indent=2))
+
+
+if __name__ == "__main__":
+    main()

@@ -80,6 +80,14 @@ def test_source_group_overlap_finds_leakage() -> None:
     assert overlap == {"source-b"}
 
 
+def test_preflight_batch_limits_must_be_paired_and_positive() -> None:
+    with pytest.raises(ValueError, match="must be set together"):
+        TrainingOptions(max_train_batches=1).validate()
+
+    with pytest.raises(ValueError, match="must be positive"):
+        TrainingOptions(max_train_batches=0, max_validation_batches=1).validate()
+
+
 def test_training_writes_metrics_and_resumes_at_next_epoch(tmp_path: Path) -> None:
     output_dir = tmp_path / "training"
     train_dataset = TinyEventDataset("train")
@@ -129,6 +137,79 @@ def test_training_writes_metrics_and_resumes_at_next_epoch(tmp_path: Path) -> No
     assert [row["epoch"] for row in resumed_history] == [1, 2]
     assert checkpoint["completed_epoch"] == 2
     assert checkpoint["global_step"] == 4
+
+
+def test_preflight_limits_batches_and_resumes(tmp_path: Path) -> None:
+    output_dir = tmp_path / "preflight"
+    train_dataset = TinyEventDataset("train")
+    validation_dataset = TinyEventDataset("val")
+    contract = {"model": "tiny", "train_manifest": "a", "val_manifest": "b"}
+
+    first_options = TrainingOptions(
+        epochs=1,
+        batch_size=2,
+        learning_rate=0.1,
+        weight_decay=0.0,
+        sequence_length=1,
+        image_size=2,
+        gradient_accumulation_steps=2,
+        max_train_batches=1,
+        max_validation_batches=1,
+    )
+    first_report = train_model(
+        model=TinyVideoClassifier(),
+        train_dataset=train_dataset,
+        validation_dataset=validation_dataset,
+        output_dir=output_dir,
+        options=first_options,
+        device=torch.device("cpu"),
+        resume_contract=contract,
+    )
+
+    first_history = json.loads(
+        (output_dir / "history.json").read_text(encoding="utf-8")
+    )
+    assert first_report["run_type"] == "engineering_preflight"
+    assert first_report["processed_train_events"] == 2
+    assert first_report["processed_validation_events"] == 2
+    assert first_history[0]["train"]["batches"] == 1
+    assert first_history[0]["train"]["events"]["samples"] == 2
+    assert first_history[0]["validation"]["batches"] == 1
+    assert first_history[0]["validation"]["events"]["samples"] == 2
+    resumed_options = TrainingOptions(
+        epochs=2,
+        batch_size=2,
+        learning_rate=0.1,
+        weight_decay=0.0,
+        sequence_length=1,
+        image_size=2,
+        gradient_accumulation_steps=2,
+        max_train_batches=1,
+        max_validation_batches=1,
+    )
+    resumed_report = train_model(
+        model=TinyVideoClassifier(),
+        train_dataset=train_dataset,
+        validation_dataset=validation_dataset,
+        output_dir=output_dir,
+        options=resumed_options,
+        device=torch.device("cpu"),
+        resume_contract=contract,
+        resume_from=output_dir / "checkpoint_last.pt",
+    )
+    checkpoint = torch.load(
+        output_dir / "checkpoint_last.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+    assert resumed_report["completed_epochs"] == 2
+    assert resumed_report["processed_train_events"] == 2
+    assert resumed_report["processed_validation_events"] == 2
+    assert checkpoint["global_step"] == 2
+    assert checkpoint["resume_contract"]["batch_limits"] == {
+        "train": 1,
+        "validation": 1,
+    }
 
 
 def test_training_stops_after_validation_metric_stalls(tmp_path: Path) -> None:

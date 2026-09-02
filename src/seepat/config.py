@@ -11,8 +11,22 @@ import yaml
 
 @dataclass(frozen=True)
 class DatasetSettings:
+    split: str
     pilot_manifest: Path
     extracted_root: Path
+
+
+@dataclass(frozen=True)
+class AudioEnhancementSettings:
+    enabled: bool
+    model_cache_dir: Path
+    demucs_model: str
+    demucs_device: str
+    demucs_segment_seconds: float | None
+    demucs_shifts: int
+    demucs_overlap: float
+    deepfilter_model: str
+    deepfilter_post_filter: bool
 
 
 @dataclass(frozen=True)
@@ -33,6 +47,7 @@ class PreprocessingSettings:
     min_valid_landmark_ratio: float
     min_bilabial_events: int
     max_debug_overlays_per_video: int
+    audio_enhancement: AudioEnhancementSettings
 
 
 @dataclass(frozen=True)
@@ -64,6 +79,15 @@ def _validate(settings: PreprocessingSettings) -> None:
         raise ValueError("min_bilabial_events must be at least 1")
     if settings.max_debug_overlays_per_video < 0:
         raise ValueError("max_debug_overlays_per_video cannot be negative")
+    audio = settings.audio_enhancement
+    if audio.demucs_device not in {"cpu", "cuda"}:
+        raise ValueError("demucs_device must be either 'cpu' or 'cuda'")
+    if audio.demucs_segment_seconds is not None and audio.demucs_segment_seconds <= 0:
+        raise ValueError("demucs_segment_seconds must be positive when provided")
+    if audio.demucs_shifts < 0:
+        raise ValueError("demucs_shifts cannot be negative")
+    if not 0 <= audio.demucs_overlap < 1:
+        raise ValueError("demucs_overlap must be at least 0 and less than 1")
 
 
 def load_pipeline_settings(path: Path, pipeline_version: str) -> PipelineSettings:
@@ -74,7 +98,13 @@ def load_pipeline_settings(path: Path, pipeline_version: str) -> PipelineSetting
 
     dataset_raw = _require_mapping(config, "dataset")
     preprocessing_raw = _require_mapping(config, "preprocessing")
+    audio_raw = preprocessing_raw.get("audio_enhancement", {})
+    if not isinstance(audio_raw, dict):
+        raise TypeError(
+            "Configuration section 'preprocessing.audio_enhancement' must be a YAML mapping"
+        )
     dataset = DatasetSettings(
+        split=str(dataset_raw.get("split", "")).strip(),
         pilot_manifest=Path(str(dataset_raw["pilot_manifest"])),
         extracted_root=Path(str(dataset_raw["extracted_root"])),
     )
@@ -100,6 +130,25 @@ def load_pipeline_settings(path: Path, pipeline_version: str) -> PipelineSetting
         min_bilabial_events=int(preprocessing_raw["min_bilabial_events"]),
         max_debug_overlays_per_video=int(
             preprocessing_raw["max_debug_overlays_per_video"]
+        ),
+        audio_enhancement=AudioEnhancementSettings(
+            enabled=bool(audio_raw.get("enabled", False)),
+            model_cache_dir=Path(
+                str(audio_raw.get("model_cache_dir", "data/cache/audio_models"))
+            ),
+            demucs_model=str(audio_raw.get("demucs_model", "htdemucs")),
+            demucs_device=str(audio_raw.get("demucs_device", "cpu")),
+            demucs_segment_seconds=(
+                float(audio_raw["demucs_segment_seconds"])
+                if audio_raw.get("demucs_segment_seconds") is not None
+                else None
+            ),
+            demucs_shifts=int(audio_raw.get("demucs_shifts", 0)),
+            demucs_overlap=float(audio_raw.get("demucs_overlap", 0.25)),
+            deepfilter_model=str(audio_raw.get("deepfilter_model", "DeepFilterNet3")),
+            deepfilter_post_filter=bool(
+                audio_raw.get("deepfilter_post_filter", False)
+            ),
         ),
     )
     _validate(preprocessing)

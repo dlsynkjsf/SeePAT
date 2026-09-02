@@ -45,6 +45,8 @@ def test_load_pipeline_settings_is_typed_and_stable(tmp_path: Path) -> None:
     assert first.dataset.pilot_manifest == Path("data/pilot.csv")
     assert first.preprocessing.min_valid_landmark_ratio == 0.8
     assert first.preprocessing.ffmpeg_path is None
+    assert first.preprocessing.audio_enhancement.enabled is False
+    assert first.preprocessing.audio_enhancement.demucs_model == "htdemucs"
     assert len(first.cache_signature) == 64
     assert first.cache_signature == second.cache_signature
 
@@ -107,3 +109,18 @@ def test_scaled_subset_configs_use_isolated_paths(
     assert settings.dataset.extracted_root == Path(extracted_root)
     assert settings.preprocessing.output_dir == Path(output_dir)
     assert settings.preprocessing.max_debug_overlays_per_video == per_video_overlays
+
+
+def test_audio_pilot_config_enables_isolated_audio_chain() -> None:
+    settings = load_pipeline_settings(
+        Path("configs/audio_pilot20.yaml"),
+        pipeline_version="pilot-v3",
+    )
+
+    audio = settings.preprocessing.audio_enhancement
+    assert settings.preprocessing.output_dir == Path("outputs/audio-pilot20-v1")
+    assert audio.enabled is True
+    assert audio.demucs_model == "htdemucs"
+    assert audio.demucs_device == "cuda"
+    assert audio.demucs_segment_seconds == 7.0
+    assert audio.deepfilter_model == "DeepFilterNet3"

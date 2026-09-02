@@ -7,6 +7,7 @@ from pathlib import Path
 from seepat.artifacts import atomic_write_json
 from seepat.config import PipelineSettings
 from seepat.preprocessing.alignment import MfaAlignmentError, MfaDockerAligner
+from seepat.preprocessing.audio import prepare_alignment_audio
 from seepat.preprocessing.eligibility import (
     event_evidence_status,
     video_evidence_status,
@@ -56,20 +57,30 @@ class PilotVideoProcessor:
             if not probe["fps"]:
                 raise ValueError("Video frame rate is unavailable")
 
-            audio_path = extract_mono_audio(
+            raw_audio_path = extract_mono_audio(
                 video_path,
                 work_dir / "audio.wav",
                 self.preprocessing.ffmpeg_path,
                 force=force,
             )
-            transcription = self._transcribe(audio_path, work_dir, force)
+            prepared_audio = prepare_alignment_audio(
+                raw_audio=raw_audio_path,
+                work_dir=work_dir,
+                settings=self.preprocessing.audio_enhancement,
+                ffmpeg_path=self.preprocessing.ffmpeg_path,
+                force=force,
+            )
+            report.update(prepared_audio.report_fields())
+            transcription = self._transcribe(
+                prepared_audio.alignment_audio, work_dir, force
+            )
             report["transcript"] = transcription["text"]
             if not str(transcription["text"]).strip():
                 report["exclusion_reason"] = "alignment_failed"
                 raise ValueError("Whisper produced an empty transcript")
 
             intervals = self.aligner.align(
-                audio_path,
+                prepared_audio.alignment_audio,
                 str(transcription["text"]),
                 work_dir / "alignment.json",
                 force=force,

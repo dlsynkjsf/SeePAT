@@ -12,18 +12,13 @@ audio manipulation.
 
 ## Method
 
-The audio track is transcribed with Whisper and aligned at the phoneme level
-with Montreal Forced Aligner. Around each bilabial timestamp, MediaPipe tracks
-the mouth and measures the Vertical Inter-lip Distance (VILD).
+Whisper transcribes the audio, Montreal Forced Aligner locates each bilabial
+phoneme, and MediaPipe measures the mouth around those timestamps. The proposed
+model combines EfficientNetV2-S, TempCNN, VILD-based synchronization evidence,
+Isolation Forest calibration, and the panel-required Video Swin Base model.
 
-EfficientNetV2-S extracts spatial mouth features, while a Temporal Convolutional
-Neural Network models how the mouth changes across frames. Isolation Forest is
-used for subject-specific anomaly calibration, and Video Swin Base fuses the
-spatial, temporal, and alignment features for binary classification.
-
-The final output consists of an authentic-or-manipulated verdict and the
-supporting bilabial evidence. A language model converts the completed result
-into a readable forensic trace but does not participate in classification.
+The classifier produces the authentic or manipulated result. A language model
+may explain the completed result, but it does not participate in classification.
 
 ## Datasets
 
@@ -38,51 +33,25 @@ face. Evidence quality is checked independently of the real or fake label.
 
 ## Research objectives
 
-The study evaluates whether the full architecture can outperform existing
-multimodal baselines, whether subject-specific Isolation Forest calibration can
-reduce false positives compared with static thresholds, and how
-EfficientNetV2-S and TempCNN contribute individually and together.
+The study compares SeePAT with multimodal baselines, tests whether
+subject-specific calibration reduces false positives, and measures the
+contribution of its spatial and temporal features.
 
-Performance is measured using accuracy, precision, recall, specificity,
-F1-score, false-positive rate, ablation experiments, and statistical comparison
-across cross-validation folds.
+## Current status
 
-## Current progress
+Implemented:
 
-The data inventory, deterministic pilot sampling, selective extraction,
-phoneme alignment, mouth-landmark analysis, evidence filtering, caching, and QA
-outputs are implemented. The training-data interface is also implemented: it
-creates filtered, source-group-safe event manifests and loads fixed-length mouth
-clips with VILD and timing features. Its automated checks pass, and the
-100-video benchmark produced 620 usable event records.
+- deterministic sampling and selective archive extraction;
+- restartable audio, alignment, mouth-tracking, and evidence-filtering steps;
+- an optional cached Demucs and DeepFilterNet audio-enhancement path;
+- filtered event manifests and a PyTorch mouth-event dataset;
+- a Video Swin Base baseline with resumable, bounded training runs; and
+- automated tests for the data and training controls.
 
-The current pilot contains 20 AV-Deepfake1M++ validation videos and 126 aligned
-bilabial events. Of these, 120 passed the automated evidence checks, and all 115
-saved minimum-closure overlays passed manual review. These figures describe the
-preprocessing pilot and are not model-performance results.
-
-A subsequent 100-video local benchmark completed without pipeline failures in
-30 minutes 15.7 seconds. It produced 654 bilabial events, retained 98 videos as
-eligible, and generated about 115.6 MiB of derived output.
-
-The panel-required Video Swin Base baseline is implemented. A full-size real
-mouth event completed a local GPU forward pass, and a balanced eight-event
-frozen-backbone classifier-head check deliberately overfit successfully. These
-are implementation checks, not model-performance results.
-
-The baseline training command now supports mixed precision, gradient
-accumulation, checkpoint recovery, early stopping, and video-level validation.
-Its control flow has passed automated tests with a small test model, but no real
-training experiment has been completed.
-
-A larger source-group-safe preprocessing run is now complete. It processed
-4,906 of 5,000 selected Train videos and 975 of 1,000 selected Validation
-videos, retaining 5,779 evidence-eligible videos and 38,727 eligible bilabial
-events across both splits. These are dataset-preparation figures, not model
-performance results.
-
-Full model training, Isolation Forest calibration, feature fusion, ablation
-experiments, and external evaluation have not yet been completed.
+The 5,000-video Train and 1,000-video Validation subsets have been preprocessed
+with the original audio path. The enhanced audio path is unit-tested and awaits
+one-video validation. Full model training, feature fusion, calibration,
+ablation experiments, and external evaluation have not been completed.
 
 ## Scope
 
