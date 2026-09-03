@@ -1,0 +1,5 @@
+# Use the PyTorch CUDA build validated for this project on Windows and Linux.
+--extra-index-url https://download.pytorch.org/whl/cu132
+
+# Install SeePAT in editable mode with every development/runtime dependency.
+-e .[dev,preprocess,audio,train]
