@@ -17,6 +17,7 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader, Dataset
 
 from seepat.artifacts import atomic_write_json
+from seepat.models.cnn_temporal import EfficientNetTempCNNEventClassifier
 from seepat.models.swin_baseline import SwinBaseEventClassifier, parameter_counts
 from seepat.training.dataset import MouthEventDataset
 from seepat.training.metrics import (
@@ -24,7 +25,51 @@ from seepat.training.metrics import (
     binary_classification_metrics,
 )
 
-TRAINING_VERSION = "swin-baseline-v1"
+SWIN_BASE_MODEL = "swin3d_b"
+CNN_TEMPORAL_MODEL = "efficientnet_v2_s_tempcnn"
+SUPPORTED_MODELS = (SWIN_BASE_MODEL, CNN_TEMPORAL_MODEL)
+MODEL_CONTRACT_NAMES = {
+    SWIN_BASE_MODEL: "torchvision.swin3d_b",
+    CNN_TEMPORAL_MODEL: "torchvision.efficientnet_v2_s+tempcnn",
+}
+MODEL_TRAINING_VERSIONS = {
+    SWIN_BASE_MODEL: "swin-baseline-v1",
+    CNN_TEMPORAL_MODEL: "cnn-temporal-v1",
+}
+# Backward-compatible public name for existing Swin run records and callers.
+TRAINING_VERSION = MODEL_TRAINING_VERSIONS[SWIN_BASE_MODEL]
+
+
+def model_contract_name(model_name: str) -> str:
+    try:
+        return MODEL_CONTRACT_NAMES[model_name]
+    except KeyError as error:
+        raise ValueError(f"Unsupported training model: {model_name!r}") from error
+
+
+def training_version_for_model(model_name: str) -> str:
+    try:
+        return MODEL_TRAINING_VERSIONS[model_name]
+    except KeyError as error:
+        raise ValueError(f"Unsupported training model: {model_name!r}") from error
+
+
+def build_event_classifier(
+    model_name: str,
+    pretrained: bool,
+    freeze_backbone: bool,
+) -> nn.Module:
+    if model_name == SWIN_BASE_MODEL:
+        return SwinBaseEventClassifier(
+            pretrained=pretrained,
+            freeze_backbone=freeze_backbone,
+        )
+    if model_name == CNN_TEMPORAL_MODEL:
+        return EfficientNetTempCNNEventClassifier(
+            pretrained=pretrained,
+            freeze_backbone=freeze_backbone,
+        )
+    raise ValueError(f"Unsupported training model: {model_name!r}")
 
 
 @dataclass(frozen=True)
@@ -129,6 +174,23 @@ def _loader(
     )
 
 
+def _forward_logits(
+    model: nn.Module,
+    videos: torch.Tensor,
+    batch: dict[str, Any],
+    device: torch.device,
+) -> torch.Tensor:
+    if not bool(getattr(model, "uses_frame_mask", False)):
+        return model(videos)
+    frame_mask = batch.get("frame_mask")
+    if not isinstance(frame_mask, torch.Tensor):
+        raise TypeError("A mask-aware model requires a tensor frame_mask in every batch")
+    return model(
+        videos,
+        frame_mask.to(device=device, dtype=torch.bool, non_blocking=True),
+    )
+
+
 def _evaluate(
     model: nn.Module,
     loader: DataLoader[Any],
@@ -155,7 +217,7 @@ def _evaluate(
                 dtype=torch.float16,
                 enabled=amp_enabled,
             ):
-                logits = model(videos)
+                logits = _forward_logits(model, videos, batch, device)
                 loss = loss_function(logits, labels)
             batch_size = labels.shape[0]
             loss_sum += float(loss.item()) * batch_size
@@ -419,7 +481,7 @@ def train_model(
                     dtype=torch.float16,
                     enabled=amp_enabled,
                 ):
-                    logits = model(videos)
+                    logits = _forward_logits(model, videos, batch, device)
                     batch_loss = loss_function(logits, labels)
                     backward_loss = batch_loss / options.gradient_accumulation_steps
                 scaler.scale(backward_loss).backward()
@@ -584,6 +646,7 @@ def train_from_manifests(
     options: TrainingOptions,
     device_name: str,
     pretrained: bool,
+    model_name: str = SWIN_BASE_MODEL,
     resume_from: Path | None = None,
 ) -> dict[str, object]:
     device = _device(device_name)
@@ -603,8 +666,9 @@ def train_from_manifests(
         image_size=options.image_size,
     )
     resume_contract = {
-        "training_version": TRAINING_VERSION,
-        "model": "torchvision.swin3d_b",
+        "training_version": training_version_for_model(model_name),
+        "model": model_contract_name(model_name),
+        "model_name": model_name,
         "pretrained": pretrained,
         "freeze_backbone": options.freeze_backbone,
         "sequence_length": options.sequence_length,
@@ -613,7 +677,8 @@ def train_from_manifests(
         "train_manifest_sha256": _sha256(train_manifest),
         "validation_manifest_sha256": _sha256(validation_manifest),
     }
-    model = SwinBaseEventClassifier(
+    model = build_event_classifier(
+        model_name=model_name,
         pretrained=pretrained and resume_from is None,
         freeze_backbone=options.freeze_backbone,
     )
@@ -636,6 +701,7 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--project-root", type=Path, default=Path("."))
     parser.add_argument("--resume-from", type=Path)
+    parser.add_argument("--model", choices=SUPPORTED_MODELS, default=SWIN_BASE_MODEL)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=1)
@@ -700,6 +766,7 @@ def main() -> None:
         options=options,
         device_name=args.device,
         pretrained=args.pretrained,
+        model_name=args.model,
         resume_from=args.resume_from,
     )
     print(json.dumps(report, indent=2))

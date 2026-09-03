@@ -10,26 +10,52 @@ jobs:
     manifest_output_dir: data/training/val-subset1000
 
 model_training:
-  name: local-swin-preflight
-  train_manifest: data/training/train-subset5000/events_train.csv
-  validation_manifest: data/training/val-subset1000/events_val.csv
-  output_dir: outputs/training/local_swin_preflight
-  project_root: .
-  device: cuda
-  pretrained: true
-  options:
-    epochs: 1
-    batch_size: 1
-    workers: 0
-    learning_rate: 0.0001
-    weight_decay: 0.01
-    gradient_accumulation_steps: 1
-    sequence_length: 16
-    image_size: 224
-    seed: 20260823
-    amp: true
-    freeze_backbone: true
-    class_weighting: balanced
-    early_stopping_patience: 3
-    max_train_batches: 5
-    max_validation_batches: 3
+  - name: local-swin-preflight
+    model: swin3d_b
+    train_manifest: data/training/train-subset5000/events_train.csv
+    validation_manifest: data/training/val-subset1000/events_val.csv
+    output_dir: outputs/training/local_swin_preflight
+    project_root: .
+    device: cuda
+    pretrained: true
+    options:
+      epochs: 1
+      batch_size: 1
+      workers: 0
+      learning_rate: 0.0001
+      weight_decay: 0.01
+      gradient_accumulation_steps: 1
+      sequence_length: 16
+      image_size: 224
+      seed: 20260823
+      amp: true
+      freeze_backbone: true
+      class_weighting: balanced
+      early_stopping_patience: 3
+      max_train_batches: 5
+      max_validation_batches: 3
+
+  - name: local-cnn-temporal-preflight
+    model: efficientnet_v2_s_tempcnn
+    train_manifest: data/training/train-subset5000/events_train.csv
+    validation_manifest: data/training/val-subset1000/events_val.csv
+    output_dir: outputs/training/local_cnn_temporal_preflight
+    project_root: .
+    device: cuda
+    pretrained: false
+    options:
+      epochs: 1
+      batch_size: 1
+      workers: 0
+      learning_rate: 0.0001
+      weight_decay: 0.01
+      gradient_accumulation_steps: 1
+      sequence_length: 16
+      image_size: 224
+      seed: 20260903
+      amp: true
+      freeze_backbone: true
+      class_weighting: balanced
+      early_stopping_patience: 3
+      max_train_batches: 2
+      max_validation_batches: 1

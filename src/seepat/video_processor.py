@@ -71,8 +71,11 @@ class PilotVideoProcessor:
                 force=force,
             )
             report.update(prepared_audio.report_fields())
+            downstream_force = (
+                force or prepared_audio.normalization_cache_hit is False
+            )
             transcription = self._transcribe(
-                prepared_audio.alignment_audio, work_dir, force
+                prepared_audio.alignment_audio, work_dir, downstream_force
             )
             report["transcript"] = transcription["text"]
             if not str(transcription["text"]).strip():
@@ -83,7 +86,7 @@ class PilotVideoProcessor:
                 prepared_audio.alignment_audio,
                 str(transcription["text"]),
                 work_dir / "alignment.json",
-                force=force,
+                force=downstream_force,
             )
             report["bilabial_event_count"] = len(intervals)
             events = self._process_events(

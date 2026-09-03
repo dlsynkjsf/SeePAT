@@ -10,9 +10,14 @@ dataset:
   inventory_database: data/manifests/avpp_inventory.sqlite
   pilot_manifest: data/manifests/pilot20.csv
   extracted_root: data/extracted/avpp/val-pilot/val
+  include_video_ids:
+    - dee94eabc347726f
+    - a0d571b91f73db7e
+    - 6c39976a93f0ef14
+    - 47dcb0962178d3fd
 
 preprocessing:
-  output_dir: outputs/audio-pilot20-v1
+  output_dir: outputs/audio-affected4-atten10-v1
   ffmpeg_path: null
   ffprobe_path: null
   whisper_model: base.en
@@ -40,3 +45,4 @@ preprocessing:
     deepfilter_model: DeepFilterNet3
     deepfilter_compensate_delay: true
     deepfilter_post_filter: false
+    deepfilter_attenuation_limit_db: 10

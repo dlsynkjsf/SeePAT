@@ -8,9 +8,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
 
-from seepat.artifacts import atomic_write_json, read_csv_rows
+from seepat.artifacts import atomic_write_json
 from seepat.config import PipelineSettings, load_pipeline_settings
-from seepat.pipeline import PIPELINE_VERSION, run_pipeline
+from seepat.pipeline import PIPELINE_VERSION, run_pipeline, selected_manifest_rows
 
 
 def directory_size(path: Path, excluded: Path | None = None) -> int:
@@ -23,9 +23,7 @@ def directory_size(path: Path, excluded: Path | None = None) -> int:
 
 
 def input_video_size(settings: PipelineSettings, limit: int | None = None) -> int:
-    rows = read_csv_rows(settings.dataset.pilot_manifest)
-    if limit is not None:
-        rows = rows[:limit]
+    rows = selected_manifest_rows(settings, limit=limit)
     return sum(
         path.stat().st_size
         for row in rows

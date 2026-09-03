@@ -15,7 +15,8 @@ from seepat.config import PipelineSettings, load_pipeline_settings
 from seepat.pipeline import PIPELINE_VERSION, run_pipeline
 from seepat.training.manifest import prepare_training_manifests
 
-WORKFLOW_VERSION = "local-pipeline-v1"
+WORKFLOW_VERSION = "local-pipeline-v2"
+SUPPORTED_TRAINING_MODELS = {"swin3d_b", "efficientnet_v2_s_tempcnn"}
 
 
 @dataclass(frozen=True)
@@ -35,12 +36,13 @@ class ModelTrainingJob:
     device: str
     pretrained: bool
     options: dict[str, object]
+    model: str = "swin3d_b"
 
 
 @dataclass(frozen=True)
 class WorkflowSettings:
     jobs: tuple[WorkflowJob, ...]
-    model_training: ModelTrainingJob | None
+    model_training_jobs: tuple[ModelTrainingJob, ...]
     report_path: Path
 
 
@@ -85,9 +87,21 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
         )
 
     raw_training = config.get("model_training")
-    model_training = None
-    if raw_training is not None:
-        training = _require_mapping(raw_training, "Model training configuration")
+    if raw_training is None:
+        raw_training_jobs: list[object] = []
+    elif isinstance(raw_training, list):
+        raw_training_jobs = raw_training
+    else:
+        raw_training_jobs = [raw_training]
+
+    model_training_jobs: list[ModelTrainingJob] = []
+    model_names: set[str] = set()
+    model_output_dirs: set[Path] = set()
+    for index, raw_model_job in enumerate(raw_training_jobs, start=1):
+        training = _require_mapping(
+            raw_model_job,
+            f"Model training configuration {index}",
+        )
         options = _require_mapping(training.get("options", {}), "Model training options")
         pretrained = training.get("pretrained", True)
         if not isinstance(pretrained, bool):
@@ -95,6 +109,9 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
         device = str(training.get("device", "auto"))
         if device not in {"auto", "cpu", "cuda"}:
             raise ValueError("Model training device must be auto, cpu, or cuda")
+        model = str(training.get("model", "swin3d_b")).strip()
+        if model not in SUPPORTED_TRAINING_MODELS:
+            raise ValueError(f"Unsupported model training model: {model!r}")
         try:
             model_training = ModelTrainingJob(
                 name=str(training.get("name", "model-training")).strip(),
@@ -105,6 +122,7 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
                 device=device,
                 pretrained=pretrained,
                 options={str(key): value for key, value in options.items()},
+                model=model,
             )
         except KeyError as error:
             raise ValueError(
@@ -112,11 +130,20 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
             ) from error
         if not model_training.name:
             raise ValueError("Model training configuration has no name")
+        if model_training.name in model_names:
+            raise ValueError(f"Duplicate model training job name: {model_training.name}")
+        if model_training.output_dir in model_output_dirs:
+            raise ValueError(
+                f"Duplicate model training output directory: {model_training.output_dir}"
+            )
+        model_names.add(model_training.name)
+        model_output_dirs.add(model_training.output_dir)
+        model_training_jobs.append(model_training)
 
     report_path = Path(str(config.get("report", "outputs/workflow_summary.json")))
     return WorkflowSettings(
         jobs=tuple(jobs),
-        model_training=model_training,
+        model_training_jobs=tuple(model_training_jobs),
         report_path=report_path,
     )
 
@@ -284,7 +311,11 @@ def _model_training_configuration_matches(
     job: ModelTrainingJob,
     run_record: dict[str, Any],
 ) -> bool:
-    from seepat.training.train import TRAINING_VERSION
+    from seepat.training.train import (
+        SWIN_BASE_MODEL,
+        model_contract_name,
+        training_version_for_model,
+    )
 
     try:
         options = _model_training_options(job)
@@ -305,8 +336,9 @@ def _model_training_configuration_matches(
         return (
             run_record.get("run_type") == expected_type
             and recorded_options == expected_options
-            and contract.get("training_version") == TRAINING_VERSION
-            and contract.get("model") == "torchvision.swin3d_b"
+            and contract.get("training_version") == training_version_for_model(job.model)
+            and contract.get("model") == model_contract_name(job.model)
+            and contract.get("model_name", SWIN_BASE_MODEL) == job.model
             and contract.get("pretrained") == job.pretrained
             and contract.get("train_manifest_sha256") == _sha256(job.train_manifest)
             and contract.get("validation_manifest_sha256")
@@ -358,6 +390,7 @@ def _run_model_training(
         options=_model_training_options(job),
         device_name=job.device,
         pretrained=job.pretrained,
+        model_name=job.model,
         resume_from=resume_from,
     )
 
@@ -401,8 +434,10 @@ def run_workflow(
         "config": config_path.as_posix(),
         "jobs": jobs,
     }
-    if settings.model_training is not None:
-        report["model_training"] = run_model_training_job(settings.model_training)
+    if settings.model_training_jobs:
+        report["model_training"] = [
+            run_model_training_job(job) for job in settings.model_training_jobs
+        ]
     atomic_write_json(settings.report_path, report)
     return report
 

@@ -10,8 +10,12 @@ train_module = pytest.importorskip("seepat.training.train")
 nn = torch.nn
 Dataset = torch.utils.data.Dataset
 TrainingOptions = train_module.TrainingOptions
+CNN_TEMPORAL_MODEL = train_module.CNN_TEMPORAL_MODEL
+SWIN_BASE_MODEL = train_module.SWIN_BASE_MODEL
+model_contract_name = train_module.model_contract_name
 source_group_overlap = train_module.source_group_overlap
 train_model = train_module.train_model
+training_version_for_model = train_module.training_version_for_model
 
 
 class TinyEventDataset(Dataset):
@@ -31,6 +35,7 @@ class TinyEventDataset(Dataset):
                     "label": torch.tensor(label, dtype=torch.long),
                     "video_label": torch.tensor(label, dtype=torch.long),
                     "video_id": f"{prefix}-video-{index}",
+                    "frame_mask": torch.tensor([True], dtype=torch.bool),
                 }
             )
 
@@ -59,6 +64,26 @@ class ConstantVideoClassifier(nn.Module):
         return self.bias.expand(video.shape[0], 2)
 
 
+class MaskAwareVideoClassifier(TinyVideoClassifier):
+    uses_frame_mask = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.mask_calls = 0
+
+    def forward(
+        self,
+        video: torch.Tensor,
+        frame_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if frame_mask is None or frame_mask.dtype is not torch.bool:
+            raise TypeError("Expected a boolean frame mask")
+        if frame_mask.shape != (video.shape[0], video.shape[2]):
+            raise ValueError("Unexpected frame mask shape")
+        self.mask_calls += 1
+        return super().forward(video)
+
+
 def _options(epochs: int) -> TrainingOptions:
     return TrainingOptions(
         epochs=epochs,
@@ -78,6 +103,17 @@ def test_source_group_overlap_finds_leakage() -> None:
     )
 
     assert overlap == {"source-b"}
+
+
+def test_model_contracts_distinguish_swin_and_cnn_temporal() -> None:
+    assert model_contract_name(SWIN_BASE_MODEL) == "torchvision.swin3d_b"
+    assert model_contract_name(CNN_TEMPORAL_MODEL).endswith("+tempcnn")
+    assert training_version_for_model(SWIN_BASE_MODEL) != training_version_for_model(
+        CNN_TEMPORAL_MODEL
+    )
+
+    with pytest.raises(ValueError, match="Unsupported training model"):
+        model_contract_name("unknown")
 
 
 def test_preflight_batch_limits_must_be_paired_and_positive() -> None:
@@ -137,6 +173,23 @@ def test_training_writes_metrics_and_resumes_at_next_epoch(tmp_path: Path) -> No
     assert [row["epoch"] for row in resumed_history] == [1, 2]
     assert checkpoint["completed_epoch"] == 2
     assert checkpoint["global_step"] == 4
+
+
+def test_training_passes_frame_masks_to_mask_aware_models(tmp_path: Path) -> None:
+    model = MaskAwareVideoClassifier()
+
+    report = train_model(
+        model=model,
+        train_dataset=TinyEventDataset("train"),
+        validation_dataset=TinyEventDataset("val"),
+        output_dir=tmp_path / "mask-aware",
+        options=_options(epochs=1),
+        device=torch.device("cpu"),
+        resume_contract={"model": "mask-aware"},
+    )
+
+    assert report["status"] == "complete"
+    assert model.mask_calls == 4
 
 
 def test_preflight_limits_batches_and_resumes(tmp_path: Path) -> None:

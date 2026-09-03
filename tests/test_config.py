@@ -43,10 +43,14 @@ def test_load_pipeline_settings_is_typed_and_stable(tmp_path: Path) -> None:
     second = load_pipeline_settings(config_path, pipeline_version="pilot-v3")
 
     assert first.dataset.pilot_manifest == Path("data/pilot.csv")
+    assert first.dataset.include_video_ids == ()
     assert first.preprocessing.min_valid_landmark_ratio == 0.8
     assert first.preprocessing.ffmpeg_path is None
     assert first.preprocessing.audio_enhancement.enabled is False
     assert first.preprocessing.audio_enhancement.demucs_model == "htdemucs"
+    assert (
+        first.preprocessing.audio_enhancement.deepfilter_attenuation_limit_db == 100.0
+    )
     assert len(first.cache_signature) == 64
     assert first.cache_signature == second.cache_signature
 
@@ -122,5 +126,61 @@ def test_audio_pilot_config_enables_isolated_audio_chain() -> None:
     assert audio.enabled is True
     assert audio.demucs_model == "htdemucs"
     assert audio.demucs_device == "cuda"
-    assert audio.demucs_segment_seconds == 7.0
+    assert audio.demucs_segment_seconds == 7
+    assert audio.deepfilter_executable is None
     assert audio.deepfilter_model == "DeepFilterNet3"
+    assert audio.deepfilter_compensate_delay is True
+    assert audio.deepfilter_attenuation_limit_db == 100.0
+    assert audio.deepfilter_fallback_enabled is False
+
+
+def test_affected_audio_config_limits_selection_and_attenuation() -> None:
+    settings = load_pipeline_settings(
+        Path("configs/audio_affected4_atten20.yaml"),
+        pipeline_version="pilot-v3",
+    )
+
+    assert settings.preprocessing.output_dir == Path(
+        "outputs/audio-affected4-atten20-v1"
+    )
+    assert settings.dataset.include_video_ids == (
+        "dee94eabc347726f",
+        "a0d571b91f73db7e",
+        "6c39976a93f0ef14",
+        "47dcb0962178d3fd",
+    )
+    assert (
+        settings.preprocessing.audio_enhancement.deepfilter_attenuation_limit_db
+        == 20.0
+    )
+
+
+def test_stricter_affected_audio_config_is_isolated() -> None:
+    settings = load_pipeline_settings(
+        Path("configs/audio_affected4_atten10.yaml"),
+        pipeline_version="pilot-v3",
+    )
+
+    assert settings.preprocessing.output_dir == Path(
+        "outputs/audio-affected4-atten10-v1"
+    )
+    assert len(settings.dataset.include_video_ids) == 4
+    assert (
+        settings.preprocessing.audio_enhancement.deepfilter_attenuation_limit_db
+        == 10.0
+    )
+
+
+def test_guarded_audio_config_enables_fallback() -> None:
+    settings = load_pipeline_settings(
+        Path("configs/audio_affected4_atten10_guard.yaml"),
+        pipeline_version="pilot-v3",
+    )
+
+    audio = settings.preprocessing.audio_enhancement
+    assert settings.preprocessing.output_dir == Path(
+        "outputs/audio-affected4-atten10-guard-v1"
+    )
+    assert len(settings.dataset.include_video_ids) == 4
+    assert audio.deepfilter_attenuation_limit_db == 10.0
+    assert audio.deepfilter_fallback_enabled is True

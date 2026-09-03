@@ -83,6 +83,41 @@ jobs:
         raise AssertionError("Duplicate job names must be rejected")
 
 
+def test_load_workflow_settings_accepts_multiple_model_jobs(tmp_path: Path) -> None:
+    path = tmp_path / "workflow.yaml"
+    path.write_text(
+        """
+jobs:
+  - name: preparation
+    pipeline_config: pipeline.yaml
+    manifest_output_dir: manifests
+model_training:
+  - name: swin
+    model: swin3d_b
+    train_manifest: train.csv
+    validation_manifest: val.csv
+    output_dir: swin-output
+  - name: cnn
+    model: efficientnet_v2_s_tempcnn
+    train_manifest: train.csv
+    validation_manifest: val.csv
+    output_dir: cnn-output
+    pretrained: false
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    settings = load_workflow_settings(path)
+
+    assert [job.name for job in settings.model_training_jobs] == ["swin", "cnn"]
+    assert [job.model for job in settings.model_training_jobs] == [
+        "swin3d_b",
+        "efficientnet_v2_s_tempcnn",
+    ]
+    assert settings.model_training_jobs[1].pretrained is False
+
+
 def test_preprocessing_current_check_detects_manifest_change(tmp_path: Path) -> None:
     config_path, source_manifest, output_dir = _write_pipeline_config(tmp_path)
     settings = load_pipeline_settings(config_path, PIPELINE_VERSION)
@@ -357,9 +392,16 @@ def test_workflow_runs_model_training_after_preparation(tmp_path: Path, monkeypa
     pipeline_config, _, _ = _write_pipeline_config(tmp_path)
     preparation_job = WorkflowJob("prepare", pipeline_config, tmp_path / "manifests")
     model_job = _model_training_job(tmp_path)
+    cnn_job = replace(
+        model_job,
+        name="local-cnn-preflight",
+        model="efficientnet_v2_s_tempcnn",
+        output_dir=tmp_path / "cnn-output",
+        pretrained=False,
+    )
     settings = WorkflowSettings(
         jobs=(preparation_job,),
-        model_training=model_job,
+        model_training_jobs=(model_job, cnn_job),
         report_path=tmp_path / "workflow-report.json",
     )
     calls: list[str] = []
@@ -371,10 +413,17 @@ def test_workflow_runs_model_training_after_preparation(tmp_path: Path, monkeypa
     )
     monkeypatch.setattr(
         "seepat.workflow.run_model_training_job",
-        lambda job: calls.append("model") or {"name": job.name},
+        lambda job: calls.append(f"model:{job.name}") or {"name": job.name},
     )
 
     report = run_workflow(tmp_path / "workflow.yaml")
 
-    assert calls == ["preparation", "model"]
-    assert report["model_training"] == {"name": "local-preflight"}
+    assert calls == [
+        "preparation",
+        "model:local-preflight",
+        "model:local-cnn-preflight",
+    ]
+    assert report["model_training"] == [
+        {"name": "local-preflight"},
+        {"name": "local-cnn-preflight"},
+    ]

@@ -12,7 +12,7 @@ dataset:
   extracted_root: data/extracted/avpp/val-pilot/val
 
 preprocessing:
-  output_dir: outputs/audio-pilot20-v1
+  output_dir: outputs/audio-pilot20-atten10-guard-v1
   ffmpeg_path: null
   ffprobe_path: null
   whisper_model: base.en
@@ -40,3 +40,5 @@ preprocessing:
     deepfilter_model: DeepFilterNet3
     deepfilter_compensate_delay: true
     deepfilter_post_filter: false
+    deepfilter_attenuation_limit_db: 10
+    deepfilter_fallback_enabled: true

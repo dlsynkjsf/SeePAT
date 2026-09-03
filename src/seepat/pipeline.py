@@ -10,7 +10,7 @@ from seepat.artifacts import (
     read_csv_rows,
     stable_id,
 )
-from seepat.config import load_pipeline_settings
+from seepat.config import PipelineSettings, load_pipeline_settings
 from seepat.preprocessing.alignment import MfaDockerAligner
 from seepat.preprocessing.face import MouthEventAnalyzer
 from seepat.preprocessing.transcription import WhisperTranscriber
@@ -30,6 +30,27 @@ ELIGIBILITY_REPORT_FIELDS = (
     "error_type",
     "error_message",
 )
+
+
+def selected_manifest_rows(
+    settings: PipelineSettings,
+    limit: int | None = None,
+) -> list[dict[str, str]]:
+    rows = read_csv_rows(settings.dataset.pilot_manifest)
+    included_ids = settings.dataset.include_video_ids
+    if included_ids:
+        requested = set(included_ids)
+        rows = [row for row in rows if stable_id(row["file"]) in requested]
+        found = {stable_id(row["file"]) for row in rows}
+        missing = requested - found
+        if missing:
+            raise ValueError(
+                "dataset.include_video_ids contains IDs absent from the manifest: "
+                + ", ".join(sorted(missing))
+            )
+    if limit is not None:
+        rows = rows[:limit]
+    return rows
 
 
 def _load_cached_result(
@@ -103,9 +124,7 @@ def run_pipeline(
     output_dir.mkdir(parents=True, exist_ok=True)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
-    manifest_rows = read_csv_rows(settings.dataset.pilot_manifest)
-    if limit is not None:
-        manifest_rows = manifest_rows[:limit]
+    manifest_rows = selected_manifest_rows(settings, limit=limit)
 
     transcriber = WhisperTranscriber(
         model_name=preprocessing.whisper_model,
