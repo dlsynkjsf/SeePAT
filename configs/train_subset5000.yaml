@@ -37,3 +37,22 @@ preprocessing:
   min_valid_landmark_ratio: 0.80
   min_bilabial_events: 1
   max_debug_overlays_per_video: 1
+  audio_enhancement:
+    enabled: true
+    model_cache_dir: data/cache/audio_models
+    demucs_model: htdemucs
+    demucs_device: cuda
+    demucs_segment_seconds: 7
+    demucs_shifts: 0
+    demucs_overlap: 0.25
+    deepfilter_executable: null
+    deepfilter_model: DeepFilterNet3
+    deepfilter_compensate_delay: true
+    deepfilter_post_filter: false
+    deepfilter_attenuation_limit_db: 10
+    deepfilter_fallback_enabled: true
+  vild_trace:
+    enabled: true
+    reference_window_seconds: 0.08
+    max_reference_windows: 8
+    speech_margin_seconds: 0.02

@@ -35,6 +35,14 @@ class AudioEnhancementSettings:
 
 
 @dataclass(frozen=True)
+class VildTraceSettings:
+    enabled: bool = False
+    reference_window_seconds: float = 0.08
+    max_reference_windows: int = 8
+    speech_margin_seconds: float = 0.02
+
+
+@dataclass(frozen=True)
 class PreprocessingSettings:
     output_dir: Path
     ffmpeg_path: Path | None
@@ -53,6 +61,7 @@ class PreprocessingSettings:
     min_bilabial_events: int
     max_debug_overlays_per_video: int
     audio_enhancement: AudioEnhancementSettings
+    vild_trace: VildTraceSettings
 
 
 @dataclass(frozen=True)
@@ -108,6 +117,13 @@ def _validate(settings: PreprocessingSettings) -> None:
         )
     if not 0 <= audio.deepfilter_attenuation_limit_db <= 100:
         raise ValueError("deepfilter_attenuation_limit_db must be between 0 and 100")
+    vild_trace = settings.vild_trace
+    if vild_trace.reference_window_seconds <= 0:
+        raise ValueError("vild_trace.reference_window_seconds must be positive")
+    if vild_trace.max_reference_windows < 1:
+        raise ValueError("vild_trace.max_reference_windows must be at least 1")
+    if vild_trace.speech_margin_seconds < 0:
+        raise ValueError("vild_trace.speech_margin_seconds cannot be negative")
 
 
 def load_pipeline_settings(path: Path, pipeline_version: str) -> PipelineSettings:
@@ -122,6 +138,11 @@ def load_pipeline_settings(path: Path, pipeline_version: str) -> PipelineSetting
     if not isinstance(audio_raw, dict):
         raise TypeError(
             "Configuration section 'preprocessing.audio_enhancement' must be a YAML mapping"
+        )
+    vild_trace_raw = preprocessing_raw.get("vild_trace", {})
+    if not isinstance(vild_trace_raw, dict):
+        raise TypeError(
+            "Configuration section 'preprocessing.vild_trace' must be a YAML mapping"
         )
     include_video_ids_raw = dataset_raw.get("include_video_ids", [])
     if not isinstance(include_video_ids_raw, list):
@@ -188,6 +209,18 @@ def load_pipeline_settings(path: Path, pipeline_version: str) -> PipelineSetting
             ),
             deepfilter_fallback_enabled=bool(
                 audio_raw.get("deepfilter_fallback_enabled", False)
+            ),
+        ),
+        vild_trace=VildTraceSettings(
+            enabled=bool(vild_trace_raw.get("enabled", False)),
+            reference_window_seconds=float(
+                vild_trace_raw.get("reference_window_seconds", 0.08)
+            ),
+            max_reference_windows=int(
+                vild_trace_raw.get("max_reference_windows", 8)
+            ),
+            speech_margin_seconds=float(
+                vild_trace_raw.get("speech_margin_seconds", 0.02)
             ),
         ),
     )

@@ -13,6 +13,7 @@ import yaml
 from seepat.artifacts import atomic_write_json, read_csv_rows, stable_id
 from seepat.config import PipelineSettings, load_pipeline_settings
 from seepat.pipeline import PIPELINE_VERSION, run_pipeline
+from seepat.preprocessing.contract import audit_preprocessing_contract
 from seepat.training.manifest import prepare_training_manifests
 
 WORKFLOW_VERSION = "local-pipeline-v2"
@@ -169,12 +170,14 @@ def preprocessing_outputs_are_current(
     output_dir = settings.preprocessing.output_dir
     summary_path = output_dir / "run_summary.json"
     video_manifest_path = output_dir / "video_manifest.csv"
-    required_paths = (
+    required_paths = [
         summary_path,
         video_manifest_path,
         output_dir / "bilabial_events.csv",
         output_dir / "eligibility_report.csv",
-    )
+    ]
+    if settings.preprocessing.vild_trace.enabled:
+        required_paths.append(output_dir / "vild_trace_index.csv")
     if not all(path.is_file() for path in required_paths):
         return False
 
@@ -186,7 +189,7 @@ def preprocessing_outputs_are_current(
         output_files = Counter(row["file"] for row in video_rows)
         expected_ids = Counter(stable_id(row["file"]) for row in source_rows)
         output_ids = Counter(row["video_id"] for row in video_rows)
-        return (
+        base_current = (
             summary.get("pipeline_version") == PIPELINE_VERSION
             and summary.get("cache_signature") == settings.cache_signature
             and summary.get("videos_requested") == len(source_rows)
@@ -194,6 +197,33 @@ def preprocessing_outputs_are_current(
             and source_files == output_files
             and expected_ids == output_ids
         )
+        if not base_current:
+            return False
+        if not settings.preprocessing.vild_trace.enabled:
+            return True
+
+        trace_index_path = output_dir / "vild_trace_index.csv"
+        if (
+            summary.get("vild_trace_enabled") is not True
+            or summary.get("vild_trace_index_sha256") != _sha256(trace_index_path)
+        ):
+            return False
+        trace_rows = read_csv_rows(trace_index_path)
+        if summary.get("vild_trace_videos") != len(trace_rows):
+            return False
+        for row in trace_rows:
+            trace_path = Path(row["vild_trace_path"])
+            if not trace_path.is_file() or row["vild_trace_sha256"] != _sha256(
+                trace_path
+            ):
+                return False
+        expected_trace_ids = {
+            row["video_id"]
+            for row in video_rows
+            if row.get("pipeline_status") == "complete"
+            and int(row.get("bilabial_event_count", 0)) > 0
+        }
+        return expected_trace_ids == {row["video_id"] for row in trace_rows}
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         return False
 
@@ -270,6 +300,13 @@ def run_workflow_job(
         )
         preprocessing_action = "ran"
 
+    contract_summary = None
+    if settings.preprocessing.vild_trace.enabled:
+        print(f"[{job.name}] preprocessing contract: auditing")
+        contract_summary = audit_preprocessing_contract(
+            settings.preprocessing.output_dir
+        )
+
     manifest_current = training_outputs_are_current(settings, job.manifest_output_dir)
     if manifest_current:
         print(f"[{job.name}] training manifest: skipped (artifacts are current)")
@@ -285,7 +322,7 @@ def run_workflow_job(
         )
         manifest_action = "built"
 
-    return {
+    result = {
         "name": job.name,
         "pipeline_config": job.pipeline_config.as_posix(),
         "preprocessing": {
@@ -297,6 +334,9 @@ def run_workflow_job(
             "summary": manifest_summary,
         },
     }
+    if contract_summary is not None:
+        result["preprocessing_contract"] = contract_summary
+    return result
 
 
 def _model_training_options(job: ModelTrainingJob):

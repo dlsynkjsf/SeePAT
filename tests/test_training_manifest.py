@@ -4,7 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from seepat.artifacts import atomic_write_csv, read_csv_rows
+from seepat.artifacts import (
+    atomic_write_csv,
+    atomic_write_gzip_json,
+    file_sha256,
+    read_csv_rows,
+)
+from seepat.preprocessing.vild import VILD_TRACE_VERSION
 from seepat.training.manifest import prepare_training_manifests
 
 
@@ -92,6 +98,58 @@ def test_prepare_training_manifests_filters_and_normalizes_paths(tmp_path: Path)
     assert rows[0]["class_id"] == "1"
     assert rows[0]["mouth_clip_path"] == "outputs/clip.mp4"
     assert float(rows[0]["phone_duration_s"]) == pytest.approx(0.1)
+
+
+def test_prepare_training_manifest_verifies_and_carries_vild_trace(tmp_path: Path) -> None:
+    clip = tmp_path / "outputs" / "clip.mp4"
+    trace = tmp_path / "outputs" / "trace.json.gz"
+    clip.parent.mkdir()
+    clip.write_bytes(b"clip")
+    atomic_write_gzip_json(
+        trace,
+        {
+            "artifact_version": VILD_TRACE_VERSION,
+            "frames": [{"timestamp_s": 1.0, "normalized_vild": 0.1}],
+            "bilabial_event_windows": [
+                {
+                    "event_id": "event-1",
+                    "window_start_s": 0.8,
+                    "window_end_s": 1.2,
+                }
+            ],
+        },
+    )
+    source_path = tmp_path / "source.csv"
+    video_path = tmp_path / "videos.csv"
+    event_path = tmp_path / "events.csv"
+    atomic_write_csv(source_path, [_source("val/video.mp4")])
+    atomic_write_csv(video_path, [_video("val/video.mp4")])
+    event = _event("val/video.mp4", "outputs/clip.mp4")
+    event.update(
+        {
+            "vild_trace_path": "outputs/trace.json.gz",
+            "vild_trace_sha256": file_sha256(trace),
+            "vild_trace_event_key": "event-1",
+            "video_phone_start_s": "1.02",
+            "video_phone_end_s": "1.12",
+            "audio_video_start_offset_s": "0.02",
+        }
+    )
+    atomic_write_csv(event_path, [event])
+
+    summary = prepare_training_manifests(
+        source_path,
+        video_path,
+        event_path,
+        tmp_path / "prepared",
+        project_root=tmp_path,
+    )
+
+    row = read_csv_rows(tmp_path / "prepared" / "events_val.csv")[0]
+    assert row["vild_trace_path"] == "outputs/trace.json.gz"
+    assert row["vild_trace_event_key"] == "event-1"
+    assert float(row["audio_video_start_offset_s"]) == pytest.approx(0.02)
+    assert summary["verified_vild_trace_files"] == 1
 
 
 def test_prepare_training_manifests_rejects_source_group_leakage(tmp_path: Path) -> None:

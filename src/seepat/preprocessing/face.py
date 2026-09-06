@@ -118,13 +118,111 @@ class MouthEventAnalyzer:
                 "install a compatible 0.10.x build."
             )
         self.cv2 = cv2
-        self.face_mesh = mp.solutions.face_mesh.FaceMesh(
+        self.mp = mp
+        self.min_detection_confidence = min_detection_confidence
+        self.face_mesh = self._create_face_mesh()
+
+    def _create_face_mesh(self):
+        return self.mp.solutions.face_mesh.FaceMesh(
             static_image_mode=False,
             max_num_faces=2,
             refine_landmarks=True,
-            min_detection_confidence=min_detection_confidence,
+            min_detection_confidence=self.min_detection_confidence,
             min_tracking_confidence=0.5,
         )
+
+    def _measure_frame(self, frame, face_mesh=None):
+        mesh = face_mesh or self.face_mesh
+        height, width = frame.shape[:2]
+        result = mesh.process(self.cv2.cvtColor(frame, self.cv2.COLOR_BGR2RGB))
+        faces = result.multi_face_landmarks or []
+        if len(faces) != 1:
+            return len(faces), None, None
+        landmarks = faces[0].landmark
+        points = {
+            index: (landmarks[index].x * width, landmarks[index].y * height)
+            for index in LIP_LANDMARKS
+        }
+        vild = normalized_vild(
+            points[INNER_UPPER_LIP],
+            points[INNER_LOWER_LIP],
+            points[LEFT_MOUTH_CORNER],
+            points[RIGHT_MOUTH_CORNER],
+        )
+        return 1, vild, points
+
+    def trace_video(self, video_path: Path, fps: float) -> dict[str, object]:
+        """Measure normalized VILD once per decoded frame for later feature work."""
+        if fps <= 0:
+            raise ValueError("fps must be positive")
+        cv2 = self.cv2
+        capture = cv2.VideoCapture(str(video_path))
+        if not capture.isOpened():
+            raise ValueError(f"OpenCV could not open {video_path}")
+
+        frames: list[dict[str, object]] = []
+        valid_frames = 0
+        multiple_face_frames = 0
+        opencv_timestamp_frames = 0
+        fallback_timestamp_frames = 0
+        last_timestamp = -math.inf
+        trace_mesh = self._create_face_mesh()
+        try:
+            frame_index = 0
+            while True:
+                ok, frame = capture.read()
+                if not ok:
+                    break
+                position_ms = float(capture.get(cv2.CAP_PROP_POS_MSEC))
+                position_s = position_ms / 1000
+                if (
+                    math.isfinite(position_s)
+                    and position_s >= 0
+                    and (frame_index == 0 or position_s > last_timestamp)
+                ):
+                    timestamp_s = position_s
+                    opencv_timestamp_frames += 1
+                else:
+                    timestamp_s = frame_index / fps
+                    if frame_index > 0 and timestamp_s <= last_timestamp:
+                        timestamp_s = last_timestamp + 1 / fps
+                    fallback_timestamp_frames += 1
+                last_timestamp = timestamp_s
+
+                face_count, vild, _ = self._measure_frame(frame, trace_mesh)
+                if face_count > 1:
+                    multiple_face_frames += 1
+                if vild is not None:
+                    valid_frames += 1
+                frames.append(
+                    {
+                        "frame_index": frame_index,
+                        "timestamp_s": round(timestamp_s, 9),
+                        "face_count": face_count,
+                        "normalized_vild": round(vild, 9) if vild is not None else None,
+                    }
+                )
+                frame_index += 1
+        finally:
+            capture.release()
+            trace_mesh.close()
+
+        attempted_frames = len(frames)
+        return {
+            "frames": frames,
+            "summary": {
+                "attempted_frames": attempted_frames,
+                "valid_frames": valid_frames,
+                "valid_landmark_ratio": (
+                    valid_frames / attempted_frames if attempted_frames else 0.0
+                ),
+                "multiple_face_ratio": (
+                    multiple_face_frames / attempted_frames if attempted_frames else 0.0
+                ),
+                "opencv_timestamp_frames": opencv_timestamp_frames,
+                "fps_fallback_timestamp_frames": fallback_timestamp_frames,
+            },
+        }
 
     def close(self) -> None:
         self.face_mesh.close()
@@ -178,6 +276,7 @@ class MouthEventAnalyzer:
         attempted_frames = 0
         valid_frames = 0
         multiple_face_frames = 0
+        mouth_crop_frame_indices: list[int] = []
         minimum_frame_image = None
         minimum_seen = math.inf
 
@@ -190,8 +289,7 @@ class MouthEventAnalyzer:
                 attempted_frames += 1
                 timestamp_s = frame_index / fps
                 height, width = frame.shape[:2]
-                result = self.face_mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                faces = result.multi_face_landmarks or []
+                face_count, vild, points = self._measure_frame(frame)
 
                 if overlay_path is not None and overlay_writer is None:
                     overlay_path.parent.mkdir(parents=True, exist_ok=True)
@@ -205,13 +303,13 @@ class MouthEventAnalyzer:
                         (width, height),
                     )
 
-                if len(faces) != 1:
-                    if len(faces) > 1:
+                if face_count != 1:
+                    if face_count > 1:
                         multiple_face_frames += 1
                     if overlay_writer is not None:
                         cv2.putText(
                             frame,
-                            f"/{phoneme}/ faces={len(faces)} VILD=NA",
+                            f"/{phoneme}/ faces={face_count} VILD=NA",
                             (7, 17),
                             cv2.FONT_HERSHEY_SIMPLEX,
                             0.42,
@@ -222,18 +320,7 @@ class MouthEventAnalyzer:
                     frame_index += 1
                     continue
 
-                landmarks = faces[0].landmark
-                points = {
-                    index: (landmarks[index].x * width, landmarks[index].y * height)
-                    for index in LIP_LANDMARKS
-                }
-                vild = normalized_vild(
-                    points[INNER_UPPER_LIP],
-                    points[INNER_LOWER_LIP],
-                    points[LEFT_MOUTH_CORNER],
-                    points[RIGHT_MOUTH_CORNER],
-                )
-                if vild is None:
+                if vild is None or points is None:
                     frame_index += 1
                     continue
                 measurements.append((timestamp_s, vild))
@@ -252,6 +339,7 @@ class MouthEventAnalyzer:
                 crop = frame[y1:y2, x1:x2]
                 if crop.size:
                     mouth_writer.write(cv2.resize(crop, (112, 112)))
+                    mouth_crop_frame_indices.append(frame_index)
 
                 if overlay_writer is not None:
                     for point in points.values():
@@ -326,6 +414,7 @@ class MouthEventAnalyzer:
                 "closure_duration_s": None,
                 "closing_velocity": None,
                 "opening_velocity": None,
+                "mouth_crop_frame_indices": [],
                 "mouth_crop_path": None,
                 "overlay_path": None,
                 "minimum_overlay_path": None,
@@ -351,6 +440,7 @@ class MouthEventAnalyzer:
             "closure_duration_s": closure_frames * frame_duration,
             "closing_velocity": _velocity(first_vild - minimum_vild, minimum_time - first_time),
             "opening_velocity": _velocity(last_vild - minimum_vild, last_time - minimum_time),
+            "mouth_crop_frame_indices": mouth_crop_frame_indices,
             "mouth_crop_path": str(mouth_clip_path),
             "overlay_path": str(overlay_path) if overlay_path is not None else None,
             "minimum_overlay_path": (

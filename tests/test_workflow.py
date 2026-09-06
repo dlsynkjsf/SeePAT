@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from seepat.artifacts import atomic_write_csv, atomic_write_json, stable_id
+from seepat.artifacts import atomic_write_csv, atomic_write_json, file_sha256, stable_id
 from seepat.config import load_pipeline_settings
 from seepat.pipeline import PIPELINE_VERSION
 from seepat.workflow import (
@@ -142,6 +142,62 @@ def test_preprocessing_current_check_detects_manifest_change(tmp_path: Path) -> 
     assert not preprocessing_outputs_are_current(settings)
 
 
+def test_preprocessing_current_check_validates_vild_trace_index(tmp_path: Path) -> None:
+    config_path, _, output_dir = _write_pipeline_config(tmp_path)
+    with config_path.open("a", encoding="utf-8") as stream:
+        stream.write(
+            "  vild_trace:\n"
+            "    enabled: true\n"
+            "    reference_window_seconds: 0.5\n"
+            "    max_reference_windows: 8\n"
+            "    speech_margin_seconds: 0.1\n"
+        )
+    settings = load_pipeline_settings(config_path, PIPELINE_VERSION)
+    video_id = stable_id("video.mp4")
+    trace_path = output_dir / "vild_traces" / f"{video_id}.json.gz"
+    trace_path.parent.mkdir(parents=True)
+    trace_path.write_bytes(b"trace")
+    atomic_write_csv(
+        output_dir / "video_manifest.csv",
+        [
+            {
+                "file": "video.mp4",
+                "video_id": video_id,
+                "pipeline_status": "complete",
+                "bilabial_event_count": 1,
+            }
+        ],
+    )
+    atomic_write_csv(output_dir / "bilabial_events.csv", [{"event_id": "event-1"}])
+    atomic_write_csv(output_dir / "eligibility_report.csv", [{"video_id": video_id}])
+    trace_index = output_dir / "vild_trace_index.csv"
+    atomic_write_csv(
+        trace_index,
+        [
+            {
+                "video_id": video_id,
+                "vild_trace_path": str(trace_path),
+                "vild_trace_sha256": file_sha256(trace_path),
+            }
+        ],
+    )
+    atomic_write_json(
+        output_dir / "run_summary.json",
+        {
+            "pipeline_version": PIPELINE_VERSION,
+            "cache_signature": settings.cache_signature,
+            "videos_requested": 1,
+            "vild_trace_enabled": True,
+            "vild_trace_videos": 1,
+            "vild_trace_index_sha256": file_sha256(trace_index),
+        },
+    )
+
+    assert preprocessing_outputs_are_current(settings)
+    trace_path.write_bytes(b"changed")
+    assert not preprocessing_outputs_are_current(settings)
+
+
 def test_training_current_check_validates_hashes(tmp_path: Path) -> None:
     config_path, source_manifest, preprocessing_dir = _write_pipeline_config(tmp_path)
     settings = load_pipeline_settings(config_path, PIPELINE_VERSION)
@@ -176,6 +232,8 @@ def test_training_current_check_validates_hashes(tmp_path: Path) -> None:
 
 def test_workflow_job_runs_only_missing_stages(tmp_path: Path, monkeypatch) -> None:
     config_path, _, output_dir = _write_pipeline_config(tmp_path)
+    with config_path.open("a", encoding="utf-8") as stream:
+        stream.write("  vild_trace:\n    enabled: true\n")
     training_dir = tmp_path / "training"
     calls: list[str] = []
 
@@ -196,15 +254,22 @@ def test_workflow_job_runs_only_missing_stages(tmp_path: Path, monkeypatch) -> N
         calls.append("manifest")
         return {"written_events": 1}
 
+    def fake_contract(path: Path) -> dict[str, object]:
+        calls.append("contract")
+        assert path == output_dir
+        return {"status": "passed"}
+
     monkeypatch.setattr("seepat.workflow.run_pipeline", fake_pipeline)
+    monkeypatch.setattr("seepat.workflow.audit_preprocessing_contract", fake_contract)
     monkeypatch.setattr("seepat.workflow.prepare_training_manifests", fake_manifest)
 
     report = run_workflow_job(
         WorkflowJob("test", config_path, training_dir),
     )
 
-    assert calls == ["preprocessing", "manifest"]
+    assert calls == ["preprocessing", "contract", "manifest"]
     assert report["preprocessing"]["action"] == "ran"
+    assert report["preprocessing_contract"]["status"] == "passed"
     assert report["training_manifest"]["action"] == "built"
     assert output_dir == load_pipeline_settings(config_path, PIPELINE_VERSION).preprocessing.output_dir
 

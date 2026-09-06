@@ -40,6 +40,18 @@ def parse_fraction(value: str | None) -> float | None:
     return float(numerator) / float(denominator)
 
 
+def _optional_float(value: object, default: float | None = None) -> float | None:
+    if value in (None, "N/A", ""):
+        return default
+    return float(value)
+
+
+def _optional_int(value: object) -> int | None:
+    if value in (None, "N/A", ""):
+        return None
+    return int(value)
+
+
 def probe_media(video_path: Path, ffprobe_path: Path | None = None) -> dict[str, object]:
     ffprobe = find_media_binary("ffprobe", ffprobe_path)
     command = [
@@ -66,13 +78,28 @@ def probe_media(video_path: Path, ffprobe_path: Path | None = None) -> dict[str,
         raise ValueError(f"No video stream found in {video_path}")
 
     duration_value = video_stream.get("duration") or raw.get("format", {}).get("duration")
-    duration_s = float(duration_value) if duration_value is not None else None
-    fps = parse_fraction(video_stream.get("avg_frame_rate")) or parse_fraction(
-        video_stream.get("r_frame_rate")
+    duration_s = _optional_float(duration_value)
+    average_frame_rate = parse_fraction(video_stream.get("avg_frame_rate"))
+    nominal_frame_rate = parse_fraction(video_stream.get("r_frame_rate"))
+    fps = average_frame_rate or nominal_frame_rate
+    video_start_time_s = _optional_float(video_stream.get("start_time"), 0.0)
+    audio_start_time_s = (
+        _optional_float(audio_stream.get("start_time"), 0.0) if audio_stream else None
     )
     return {
         "duration_s": duration_s,
         "fps": fps,
+        "average_frame_rate": average_frame_rate,
+        "nominal_frame_rate": nominal_frame_rate,
+        "video_time_base": video_stream.get("time_base"),
+        "video_frame_count": _optional_int(video_stream.get("nb_frames")),
+        "video_start_time_s": video_start_time_s,
+        "audio_start_time_s": audio_start_time_s,
+        "audio_video_start_offset_s": (
+            audio_start_time_s - video_start_time_s
+            if audio_start_time_s is not None and video_start_time_s is not None
+            else None
+        ),
         "width": int(video_stream["width"]),
         "height": int(video_stream["height"]),
         "video_codec": video_stream.get("codec_name"),

@@ -6,7 +6,13 @@ import json
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from seepat.artifacts import atomic_write_csv, atomic_write_json, read_csv_rows
+from seepat.artifacts import (
+    atomic_write_csv,
+    atomic_write_json,
+    file_sha256,
+    read_csv_rows,
+)
+from seepat.preprocessing.vild import load_vild_trace
 
 SUPPORTED_LABELS = {"real": 0, "fake": 1}
 
@@ -128,10 +134,25 @@ def _training_row(
         "phoneme": event.get("phoneme", "").strip(),
         "phone_start_s": str(start),
         "phone_end_s": str(end),
+        "video_phone_start_s": _float_text(
+            event.get("video_phone_start_s", event["phone_start_s"])
+        ),
+        "video_phone_end_s": _float_text(
+            event.get("video_phone_end_s", event["phone_end_s"])
+        ),
+        "audio_video_start_offset_s": _float_text(
+            event.get("audio_video_start_offset_s", "0")
+        ),
         "phone_duration_s": str(round(end - start, 9)),
         "event_label": label,
         "class_id": SUPPORTED_LABELS[label],
         "mouth_clip_path": _portable_path(event["mouth_crop_path"]),
+        "mouth_crop_frame_indices_json": event.get(
+            "mouth_crop_frame_indices_json", "[]"
+        ).strip(),
+        "vild_trace_path": _portable_path(event.get("vild_trace_path", "")),
+        "vild_trace_sha256": event.get("vild_trace_sha256", "").strip(),
+        "vild_trace_event_key": event.get("vild_trace_event_key", "").strip(),
         "normalized_minimum_closure": _float_text(
             event.get("normalized_minimum_closure", "")
         ),
@@ -161,6 +182,8 @@ def prepare_training_manifests(
     prepared: list[dict[str, object]] = []
     omitted: Counter[str] = Counter()
     seen_event_ids: set[str] = set()
+    verified_trace_hashes: dict[Path, str] = {}
+    verified_trace_events: dict[Path, set[str]] = {}
 
     for event in event_rows:
         event_id = event.get("event_id", "").strip()
@@ -193,6 +216,42 @@ def prepare_training_manifests(
         if require_clips and not resolved_clip.is_file():
             omitted["missing_clip_file"] += 1
             continue
+
+        trace_text = _portable_path(event.get("vild_trace_path", ""))
+        if video.get("vild_trace_path", "").strip() and not trace_text:
+            omitted["missing_vild_trace_path"] += 1
+            continue
+        if trace_text:
+            trace_path = Path(trace_text)
+            resolved_trace = (
+                trace_path if trace_path.is_absolute() else project_root / trace_path
+            )
+            if not resolved_trace.is_file():
+                omitted["missing_vild_trace_file"] += 1
+                continue
+            recorded_trace_hash = event.get("vild_trace_sha256", "").strip()
+            if not recorded_trace_hash:
+                omitted["missing_vild_trace_hash"] += 1
+                continue
+            actual_trace_hash = verified_trace_hashes.get(resolved_trace)
+            if actual_trace_hash is None:
+                actual_trace_hash = file_sha256(resolved_trace)
+                verified_trace_hashes[resolved_trace] = actual_trace_hash
+            if recorded_trace_hash != actual_trace_hash:
+                omitted["vild_trace_hash_mismatch"] += 1
+                continue
+            trace_event_ids = verified_trace_events.get(resolved_trace)
+            if trace_event_ids is None:
+                trace_artifact = load_vild_trace(resolved_trace)
+                trace_event_ids = {
+                    str(window["event_id"])
+                    for window in trace_artifact["bilabial_event_windows"]
+                }
+                verified_trace_events[resolved_trace] = trace_event_ids
+            trace_event_key = event.get("vild_trace_event_key", "").strip()
+            if trace_event_key != event_id or trace_event_key not in trace_event_ids:
+                omitted["vild_trace_event_missing"] += 1
+                continue
 
         prepared.append(_training_row(event, video, sources_by_file[file_name]))
 
@@ -255,6 +314,7 @@ def prepare_training_manifests(
             split: len(source_groups[split]) for split in sorted(source_groups)
         },
         "require_clips": require_clips,
+        "verified_vild_trace_files": len(verified_trace_hashes),
         "combined_manifest": combined_path.as_posix(),
         "combined_manifest_sha256": _sha256(combined_path),
         "split_manifests": split_paths,

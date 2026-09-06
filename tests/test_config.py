@@ -51,6 +51,9 @@ def test_load_pipeline_settings_is_typed_and_stable(tmp_path: Path) -> None:
     assert (
         first.preprocessing.audio_enhancement.deepfilter_attenuation_limit_db == 100.0
     )
+    assert first.preprocessing.vild_trace.enabled is False
+    assert first.preprocessing.vild_trace.reference_window_seconds == 0.08
+    assert first.preprocessing.vild_trace.speech_margin_seconds == 0.02
     assert len(first.cache_signature) == 64
     assert first.cache_signature == second.cache_signature
 
@@ -113,6 +116,14 @@ def test_scaled_subset_configs_use_isolated_paths(
     assert settings.dataset.extracted_root == Path(extracted_root)
     assert settings.preprocessing.output_dir == Path(output_dir)
     assert settings.preprocessing.max_debug_overlays_per_video == per_video_overlays
+    assert settings.preprocessing.audio_enhancement.enabled is True
+    assert (
+        settings.preprocessing.audio_enhancement.deepfilter_attenuation_limit_db
+        == 10.0
+    )
+    assert settings.preprocessing.audio_enhancement.deepfilter_fallback_enabled is True
+    assert settings.preprocessing.vild_trace.enabled is True
+    assert settings.preprocessing.vild_trace.max_reference_windows == 8
 
 
 def test_audio_pilot_config_enables_isolated_audio_chain() -> None:
@@ -184,3 +195,16 @@ def test_guarded_audio_config_enables_fallback() -> None:
     assert len(settings.dataset.include_video_ids) == 4
     assert audio.deepfilter_attenuation_limit_db == 10.0
     assert audio.deepfilter_fallback_enabled is True
+
+
+def test_preprocessing_contract_canary_is_guarded_trace_enabled_and_isolated() -> None:
+    settings = load_pipeline_settings(
+        Path("configs/preprocessing_contract_canary.yaml"),
+        pipeline_version="pilot-v4",
+    )
+
+    assert settings.preprocessing.output_dir == Path(
+        "outputs/preprocessing-contract-canary-v1"
+    )
+    assert settings.preprocessing.audio_enhancement.deepfilter_fallback_enabled is True
+    assert settings.preprocessing.vild_trace.enabled is True

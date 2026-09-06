@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from seepat.preprocessing.face import (
+    MouthEventAnalyzer,
     event_frame_bounds,
     normalized_vild,
     timestamp_to_frame,
@@ -47,3 +48,50 @@ def test_normalized_vild_is_scale_invariant() -> None:
 
 def test_normalized_vild_rejects_degenerate_mouth_width() -> None:
     assert normalized_vild((0.0, 0.0), (0.0, 1.0), (2.0, 2.0), (2.0, 2.0)) is None
+
+
+def test_full_video_trace_keeps_invalid_and_multiple_face_frames(tmp_path) -> None:
+    class FakeCapture:
+        def __init__(self) -> None:
+            self.position = 0
+
+        def isOpened(self) -> bool:
+            return True
+
+        def read(self):
+            if self.position == 3:
+                return False, None
+            self.position += 1
+            return True, object()
+
+        def get(self, _property):
+            return 0.0
+
+        def release(self) -> None:
+            return None
+
+    class FakeMesh:
+        def close(self) -> None:
+            return None
+
+    capture = FakeCapture()
+    analyzer = object.__new__(MouthEventAnalyzer)
+    analyzer.cv2 = type(
+        "FakeCv2",
+        (),
+        {
+            "CAP_PROP_POS_MSEC": 0,
+            "VideoCapture": staticmethod(lambda path: capture),
+        },
+    )()
+    analyzer._create_face_mesh = lambda: FakeMesh()
+    measurements = iter([(1, 0.1, None), (0, None, None), (2, None, None)])
+    analyzer._measure_frame = lambda frame, mesh: next(measurements)
+
+    trace = analyzer.trace_video(tmp_path / "video.mp4", fps=10.0)
+
+    assert [frame["timestamp_s"] for frame in trace["frames"]] == [0.0, 0.1, 0.2]
+    assert [frame["face_count"] for frame in trace["frames"]] == [1, 0, 2]
+    assert trace["summary"]["valid_landmark_ratio"] == pytest.approx(1 / 3)
+    assert trace["summary"]["multiple_face_ratio"] == pytest.approx(1 / 3)
+    assert trace["summary"]["fps_fallback_timestamp_frames"] == 2

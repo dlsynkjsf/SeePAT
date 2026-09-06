@@ -8,11 +8,11 @@ dataset:
     - data/raw/avpp/train_metadata.json
     - data/raw/avpp/val_metadata.json
   inventory_database: data/manifests/avpp_inventory.sqlite
-  pilot_manifest: data/manifests/val_subset1000.csv
-  extracted_root: data/extracted/avpp/val-subset1000/val
+  pilot_manifest: data/manifests/pilot20.csv
+  extracted_root: data/extracted/avpp/val-pilot/val
 
 sampling:
-  per_category: 250
+  per_category: 5
   categories:
     - real
     - audio_modified
@@ -21,7 +21,7 @@ sampling:
   require_unique_originals: true
 
 preprocessing:
-  output_dir: outputs/val-subset1000
+  output_dir: outputs/preprocessing-contract-canary-v1
   ffmpeg_path: null
   ffprobe_path: null
   whisper_model: base.en
@@ -36,7 +36,7 @@ preprocessing:
   manipulation_boundary_tolerance_s: 0.04
   min_valid_landmark_ratio: 0.80
   min_bilabial_events: 1
-  max_debug_overlays_per_video: 1
+  max_debug_overlays_per_video: 10
   audio_enhancement:
     enabled: true
     model_cache_dir: data/cache/audio_models

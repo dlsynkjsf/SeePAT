@@ -7,6 +7,7 @@ from pathlib import Path
 from seepat.artifacts import (
     atomic_write_csv,
     atomic_write_json,
+    file_sha256,
     read_csv_rows,
     stable_id,
 )
@@ -16,7 +17,7 @@ from seepat.preprocessing.face import MouthEventAnalyzer
 from seepat.preprocessing.transcription import WhisperTranscriber
 from seepat.video_processor import PilotVideoProcessor
 
-PIPELINE_VERSION = "pilot-v3"
+PIPELINE_VERSION = "pilot-v4"
 ELIGIBILITY_REPORT_FIELDS = (
     "video_id",
     "file",
@@ -57,6 +58,7 @@ def _load_cached_result(
     result_path: Path,
     signature: str,
     retry_failed: bool = False,
+    require_vild_trace: bool = False,
 ) -> dict | None:
     if not result_path.is_file():
         return None
@@ -65,6 +67,18 @@ def _load_cached_result(
         return None
     if retry_failed and cached.get("video_report", {}).get("pipeline_status") != "complete":
         return None
+    report = cached.get("video_report", {})
+    if (
+        require_vild_trace
+        and report.get("pipeline_status") == "complete"
+        and int(report.get("bilabial_event_count", 0)) > 0
+    ):
+        trace_path = Path(str(report.get("vild_trace_path", "")))
+        if (
+            not trace_path.is_file()
+            or report.get("vild_trace_sha256") != file_sha256(trace_path)
+        ):
+            return None
     return cached
 
 
@@ -74,6 +88,7 @@ def _write_run_outputs(
     signature: str,
     video_reports: list[dict[str, object]],
     events: list[dict[str, object]],
+    vild_trace_enabled: bool,
 ) -> dict[str, object]:
     atomic_write_csv(output_dir / "video_manifest.csv", video_reports)
     atomic_write_csv(output_dir / "bilabial_events.csv", events)
@@ -82,6 +97,24 @@ def _write_run_outputs(
         for report in video_reports
     ]
     atomic_write_csv(output_dir / "eligibility_report.csv", eligibility_rows)
+    trace_rows = [
+        {
+            "video_id": report["video_id"],
+            "file": report["file"],
+            "vild_trace_path": report["vild_trace_path"],
+            "vild_trace_sha256": report["vild_trace_sha256"],
+            "vild_trace_frame_count": report["vild_trace_frame_count"],
+            "vild_trace_valid_landmark_ratio": report[
+                "vild_trace_valid_landmark_ratio"
+            ],
+            "vild_reference_window_count": report["vild_reference_window_count"],
+        }
+        for report in video_reports
+        if report.get("vild_trace_path")
+    ]
+    trace_index_path = output_dir / "vild_trace_index.csv"
+    if vild_trace_enabled:
+        atomic_write_csv(trace_index_path, trace_rows)
 
     summary: dict[str, object] = {
         "pipeline_version": PIPELINE_VERSION,
@@ -101,7 +134,15 @@ def _write_run_outputs(
         "ambiguous_training_events": sum(
             event["training_label_status"] == "omit_boundary" for event in events
         ),
+        "vild_trace_enabled": vild_trace_enabled,
+        "vild_trace_videos": len(trace_rows),
+        "vild_reference_windows": sum(
+            int(row["vild_reference_window_count"]) for row in trace_rows
+        ),
     }
+    if vild_trace_enabled:
+        summary["vild_trace_index"] = str(trace_index_path)
+        summary["vild_trace_index_sha256"] = file_sha256(trace_index_path)
     atomic_write_json(output_dir / "run_summary.json", summary)
     return summary
 
@@ -155,6 +196,7 @@ def run_pipeline(
                 result_path,
                 settings.cache_signature,
                 retry_failed=retry_failed,
+                require_vild_trace=preprocessing.vild_trace.enabled,
             )
             if cached is not None:
                 video_reports.append(cached["video_report"])
@@ -185,6 +227,7 @@ def run_pipeline(
         signature=settings.cache_signature,
         video_reports=video_reports,
         events=all_events,
+        vild_trace_enabled=preprocessing.vild_trace.enabled,
     )
 
 

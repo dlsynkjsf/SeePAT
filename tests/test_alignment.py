@@ -11,6 +11,7 @@ from seepat.preprocessing.alignment import (
     ensure_docker_daemon,
     normalize_arpa_phone,
     parse_mfa_json,
+    parse_mfa_phone_intervals,
 )
 
 
@@ -34,6 +35,10 @@ def test_parse_mfa_json_keeps_only_bilabials(tmp_path: Path) -> None:
             "phone_end_s": 0.2,
             "speaker": "",
         }
+    ]
+    assert [row["phoneme"] for row in parse_mfa_phone_intervals(output)] == [
+        "ah",
+        "b",
     ]
 
 

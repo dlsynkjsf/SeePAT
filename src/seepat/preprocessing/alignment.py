@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 BILABIAL_PHONES = frozenset({"P", "B", "M"})
+SILENCE_PHONES = frozenset({"", "SIL", "<EPS>"})
 
 
 class MfaAlignmentError(RuntimeError):
@@ -35,7 +36,7 @@ def normalize_arpa_phone(label: str) -> str:
     return re.sub(r"\d+$", "", label.strip().upper())
 
 
-def parse_mfa_json(path: Path) -> list[dict[str, object]]:
+def parse_mfa_phone_intervals(path: Path) -> list[dict[str, object]]:
     data = json.loads(path.read_text(encoding="utf-8"))
     tiers = data.get("tiers", {})
     phone_tier = next(
@@ -50,8 +51,6 @@ def parse_mfa_json(path: Path) -> list[dict[str, object]]:
             continue
         begin, end, label = entry
         phone = normalize_arpa_phone(str(label))
-        if phone not in BILABIAL_PHONES:
-            continue
         intervals.append(
             {
                 "phoneme": phone.lower(),
@@ -61,6 +60,14 @@ def parse_mfa_json(path: Path) -> list[dict[str, object]]:
             }
         )
     return intervals
+
+
+def parse_mfa_json(path: Path) -> list[dict[str, object]]:
+    return [
+        interval
+        for interval in parse_mfa_phone_intervals(path)
+        if str(interval["phoneme"]).upper() in BILABIAL_PHONES
+    ]
 
 
 class MfaDockerAligner:
