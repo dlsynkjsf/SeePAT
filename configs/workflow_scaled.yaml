@@ -14,7 +14,7 @@ model_training:
     model: swin3d_b
     train_manifest: data/training/train-subset5000/events_train.csv
     validation_manifest: data/training/val-subset1000/events_val.csv
-    output_dir: outputs/training/local_swin_preflight
+    output_dir: outputs/training/local_swin_preflight_guarded
     project_root: .
     device: cuda
     pretrained: true
@@ -39,7 +39,7 @@ model_training:
     model: efficientnet_v2_s_tempcnn
     train_manifest: data/training/train-subset5000/events_train.csv
     validation_manifest: data/training/val-subset1000/events_val.csv
-    output_dir: outputs/training/local_cnn_temporal_preflight
+    output_dir: outputs/training/local_cnn_temporal_preflight_guarded
     project_root: .
     device: cuda
     pretrained: false
