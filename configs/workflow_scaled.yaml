@@ -9,6 +9,17 @@ jobs:
     pipeline_config: configs/val_subset1000.yaml
     manifest_output_dir: data/training/val-subset1000
 
+numerical_calibration:
+  name: guarded-vild-calibration
+  train_manifest: data/training/train-subset5000/events_train.csv
+  score_manifests:
+    train: data/training/train-subset5000/events_train.csv
+    val: data/training/val-subset1000/events_val.csv
+  output_dir: outputs/numerical_calibration/guarded_v1
+  min_subject_reference_frames: 16
+  isolation_trees: 100
+  random_seed: 20260908
+
 model_training:
   - name: local-swin-preflight
     model: swin3d_b

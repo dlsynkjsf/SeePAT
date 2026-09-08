@@ -17,7 +17,7 @@ from seepat.preprocessing.face import MouthEventAnalyzer
 from seepat.preprocessing.transcription import WhisperTranscriber
 from seepat.video_processor import PilotVideoProcessor
 
-PIPELINE_VERSION = "pilot-v4"
+PIPELINE_VERSION = "pilot-v5"
 ELIGIBILITY_REPORT_FIELDS = (
     "video_id",
     "file",

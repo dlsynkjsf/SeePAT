@@ -10,6 +10,7 @@ from seepat.config import load_pipeline_settings
 from seepat.pipeline import PIPELINE_VERSION
 from seepat.workflow import (
     ModelTrainingJob,
+    NumericalCalibrationJob,
     WorkflowJob,
     WorkflowSettings,
     _sha256,
@@ -116,6 +117,47 @@ model_training:
         "efficientnet_v2_s_tempcnn",
     ]
     assert settings.model_training_jobs[1].pretrained is False
+
+
+def test_load_workflow_settings_accepts_numerical_calibration_job(tmp_path: Path) -> None:
+    path = tmp_path / "workflow.yaml"
+    path.write_text(
+        """
+jobs:
+  - name: preparation
+    pipeline_config: pipeline.yaml
+    manifest_output_dir: manifests
+numerical_calibration:
+  name: vild
+  train_manifest: train.csv
+  score_manifests:
+    train: train.csv
+    val: val.csv
+  output_dir: calibration
+  min_subject_reference_frames: 4
+  isolation_trees: 10
+  random_seed: 9
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    settings = load_workflow_settings(path)
+
+    assert settings.numerical_calibration_jobs == (
+        NumericalCalibrationJob(
+            name="vild",
+            train_manifest=Path("train.csv"),
+            score_manifests=(
+                ("train", Path("train.csv")),
+                ("val", Path("val.csv")),
+            ),
+            output_dir=Path("calibration"),
+            min_subject_reference_frames=4,
+            isolation_trees=10,
+            random_seed=9,
+        ),
+    )
 
 
 def test_preprocessing_current_check_detects_manifest_change(tmp_path: Path) -> None:
@@ -271,7 +313,10 @@ def test_workflow_job_runs_only_missing_stages(tmp_path: Path, monkeypatch) -> N
     assert report["preprocessing"]["action"] == "ran"
     assert report["preprocessing_contract"]["status"] == "passed"
     assert report["training_manifest"]["action"] == "built"
-    assert output_dir == load_pipeline_settings(config_path, PIPELINE_VERSION).preprocessing.output_dir
+    assert (
+        output_dir
+        == load_pipeline_settings(config_path, PIPELINE_VERSION).preprocessing.output_dir
+    )
 
 
 def test_workflow_job_skips_current_stages(tmp_path: Path, monkeypatch) -> None:

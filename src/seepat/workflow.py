@@ -41,10 +41,22 @@ class ModelTrainingJob:
 
 
 @dataclass(frozen=True)
+class NumericalCalibrationJob:
+    name: str
+    train_manifest: Path
+    score_manifests: tuple[tuple[str, Path], ...]
+    output_dir: Path
+    min_subject_reference_frames: int = 16
+    isolation_trees: int = 100
+    random_seed: int = 20260908
+
+
+@dataclass(frozen=True)
 class WorkflowSettings:
     jobs: tuple[WorkflowJob, ...]
     model_training_jobs: tuple[ModelTrainingJob, ...]
     report_path: Path
+    numerical_calibration_jobs: tuple[NumericalCalibrationJob, ...] = ()
 
 
 def _require_mapping(value: object, description: str) -> dict[str, Any]:
@@ -141,11 +153,70 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
         model_output_dirs.add(model_training.output_dir)
         model_training_jobs.append(model_training)
 
+    raw_calibration = config.get("numerical_calibration")
+    if raw_calibration is None:
+        raw_calibration_jobs: list[object] = []
+    elif isinstance(raw_calibration, list):
+        raw_calibration_jobs = raw_calibration
+    else:
+        raw_calibration_jobs = [raw_calibration]
+    numerical_calibration_jobs: list[NumericalCalibrationJob] = []
+    calibration_names: set[str] = set()
+    calibration_output_dirs: set[Path] = set()
+    for index, raw_calibration_job in enumerate(raw_calibration_jobs, start=1):
+        calibration = _require_mapping(
+            raw_calibration_job, f"Numerical calibration configuration {index}"
+        )
+        raw_scoring = _require_mapping(
+            calibration.get("score_manifests", {}),
+            "Numerical calibration score_manifests",
+        )
+        score_manifests = tuple(
+            (str(name).strip(), Path(str(value)))
+            for name, value in sorted(
+                raw_scoring.items(), key=lambda item: str(item[0])
+            )
+        )
+        if not score_manifests or any(not name for name, _ in score_manifests):
+            raise ValueError("Numerical calibration requires named score_manifests")
+        if len({name for name, _ in score_manifests}) != len(score_manifests):
+            raise ValueError("Numerical calibration score_manifests names must be unique")
+        try:
+            calibration_job = NumericalCalibrationJob(
+                name=str(calibration.get("name", "numerical-calibration")).strip(),
+                train_manifest=Path(str(calibration["train_manifest"])),
+                score_manifests=score_manifests,
+                output_dir=Path(str(calibration["output_dir"])),
+                min_subject_reference_frames=int(
+                    calibration.get("min_subject_reference_frames", 16)
+                ),
+                isolation_trees=int(calibration.get("isolation_trees", 100)),
+                random_seed=int(calibration.get("random_seed", 20260908)),
+            )
+        except KeyError as error:
+            raise ValueError(
+                f"Numerical calibration configuration is missing {error.args[0]!r}"
+            ) from error
+        if not calibration_job.name:
+            raise ValueError("Numerical calibration configuration has no name")
+        if calibration_job.name in calibration_names:
+            raise ValueError(
+                f"Duplicate numerical calibration job name: {calibration_job.name}"
+            )
+        if calibration_job.output_dir in calibration_output_dirs:
+            raise ValueError(
+                f"Duplicate numerical calibration output directory: {calibration_job.output_dir}"
+            )
+        calibration_names.add(calibration_job.name)
+        calibration_output_dirs.add(calibration_job.output_dir)
+        numerical_calibration_jobs.append(calibration_job)
+
     report_path = Path(str(config.get("report", "outputs/workflow_summary.json")))
     return WorkflowSettings(
         jobs=tuple(jobs),
         model_training_jobs=tuple(model_training_jobs),
         report_path=report_path,
+        numerical_calibration_jobs=tuple(numerical_calibration_jobs),
     )
 
 
@@ -463,6 +534,85 @@ def run_model_training_job(job: ModelTrainingJob) -> dict[str, object]:
     return {"name": job.name, "action": action, "summary": summary}
 
 
+def numerical_calibration_outputs_are_current(job: NumericalCalibrationJob) -> bool:
+    required = (
+        job.train_manifest,
+        job.output_dir / "summary.json",
+        job.output_dir / "calibration.json",
+        job.output_dir / "isolation_forests.joblib",
+    )
+    if not all(path.is_file() for path in required) or not all(
+        path.is_file() for _, path in job.score_manifests
+    ):
+        return False
+    try:
+        summary = _read_json(job.output_dir / "summary.json")
+        if summary.get("train_manifest_sha256") != _sha256(job.train_manifest):
+            return False
+        if summary.get("calibration_sha256") != _sha256(
+            job.output_dir / "calibration.json"
+        ):
+            return False
+        calibration = _read_json(job.output_dir / "calibration.json")
+        if calibration.get("isolation_forest_models_sha256") != _sha256(
+            job.output_dir / "isolation_forests.joblib"
+        ):
+            return False
+        recorded_options = _require_mapping(
+            summary.get("options"), "Calibration options"
+        )
+        if recorded_options != {
+            "min_subject_reference_frames": job.min_subject_reference_frames,
+            "isolation_trees": job.isolation_trees,
+            "random_seed": job.random_seed,
+        }:
+            return False
+        recorded_inputs = _require_mapping(
+            summary.get("score_manifest_sha256"), "Calibration score input hashes"
+        )
+        recorded_outputs = _require_mapping(
+            summary.get("scored_manifest_sha256"), "Calibrated manifest hashes"
+        )
+        recorded_paths = _require_mapping(
+            summary.get("scored_manifests"), "Calibrated manifest paths"
+        )
+        for name, input_path in job.score_manifests:
+            output_path = Path(str(recorded_paths.get(name, "")))
+            if (
+                recorded_inputs.get(name) != _sha256(input_path)
+                or not output_path.is_file()
+                or recorded_outputs.get(name) != _sha256(output_path)
+            ):
+                return False
+        return summary.get("reference_frames", 0) >= 2
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return False
+
+
+def run_numerical_calibration_job(job: NumericalCalibrationJob) -> dict[str, object]:
+    if numerical_calibration_outputs_are_current(job):
+        print(f"[{job.name}] numerical calibration: skipped (artifacts are current)")
+        return {
+            "name": job.name,
+            "action": "skipped",
+            "summary": _read_json(job.output_dir / "summary.json"),
+        }
+    from seepat.training.calibration import CalibrationOptions, fit_and_score_calibration
+
+    print(f"[{job.name}] numerical calibration: fitting Train-only evidence")
+    summary = fit_and_score_calibration(
+        train_manifest=job.train_manifest,
+        score_manifests=dict(job.score_manifests),
+        output_dir=job.output_dir,
+        options=CalibrationOptions(
+            min_subject_reference_frames=job.min_subject_reference_frames,
+            isolation_trees=job.isolation_trees,
+            random_seed=job.random_seed,
+        ),
+    )
+    return {"name": job.name, "action": "ran", "summary": summary}
+
+
 def run_workflow(
     config_path: Path,
     retry_failed: bool = False,
@@ -474,6 +624,11 @@ def run_workflow(
         "config": config_path.as_posix(),
         "jobs": jobs,
     }
+    if settings.numerical_calibration_jobs:
+        report["numerical_calibration"] = [
+            run_numerical_calibration_job(job)
+            for job in settings.numerical_calibration_jobs
+        ]
     if settings.model_training_jobs:
         report["model_training"] = [
             run_model_training_job(job) for job in settings.model_training_jobs

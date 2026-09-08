@@ -31,6 +31,7 @@ audio = [
   "numpy>=1.26,<3",
 ]
 train = [
+  "scikit-learn>=1.5,<2",
   "numpy>=1.26,<3",
   "opencv-contrib-python>=4.10,<5",
   "torch==2.12.1",

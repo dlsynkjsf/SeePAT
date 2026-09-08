@@ -11,7 +11,7 @@ from seepat.artifacts import file_sha256, read_gzip_json
 from seepat.config import VildTraceSettings
 from seepat.preprocessing.alignment import SILENCE_PHONES
 
-VILD_TRACE_VERSION = "vild-trace-v1"
+VILD_TRACE_VERSION = "vild-trace-v2"
 
 
 def load_vild_trace(path: Path, expected_sha256: str | None = None) -> dict[str, object]:

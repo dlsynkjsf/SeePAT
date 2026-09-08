@@ -33,6 +33,7 @@ def test_find_deepfilter_binary_accepts_explicit_path(
 ) -> None:
     executable = tmp_path / "deep-filter"
     executable.write_bytes(b"binary")
+    executable.chmod(0o755)
     monkeypatch.setattr(audio.shutil, "which", lambda name: None)
 
     assert audio.find_deepfilter_binary(executable) == executable.resolve()
