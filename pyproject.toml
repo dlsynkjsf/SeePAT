@@ -41,6 +41,9 @@ train = [
 [project.scripts]
 seepat-data = "seepat.cli:main"
 seepat-workflow = "seepat.workflow:main"
+seepat-verdict = "seepat.verdict:main"
+seepat-threshold = "seepat.verdict:threshold_main"
+seepat-xai = "seepat.xai:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

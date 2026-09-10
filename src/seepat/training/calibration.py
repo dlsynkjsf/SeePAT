@@ -40,6 +40,9 @@ class CalibrationOptions:
             raise ValueError("isolation_trees must be positive")
 
 
+DEFAULT_CALIBRATION_OPTIONS = CalibrationOptions()
+
+
 def _float_or_none(value: object) -> float | None:
     try:
         number = float(value)
@@ -311,7 +314,7 @@ def fit_and_score_calibration(
     train_manifest: Path,
     score_manifests: dict[str, Path],
     output_dir: Path,
-    options: CalibrationOptions = CalibrationOptions(),
+    options: CalibrationOptions = DEFAULT_CALIBRATION_OPTIONS,
 ) -> dict[str, object]:
     """Fit on genuine Train non-speech frames, then score active event minima."""
     options.validate()
@@ -375,9 +378,75 @@ def fit_and_score_calibration(
     return summary
 
 
+def score_manifests_with_calibration(
+    calibration_path: Path,
+    score_manifests: dict[str, Path],
+    output_dir: Path,
+) -> dict[str, object]:
+    """Score manifests with a frozen calibration artifact without refitting.
+
+    This is the evaluation path for external benchmarks: it loads the verified
+    ``calibration.json`` and ``isolation_forests.joblib`` produced by a Train
+    run and only applies them to new events. No regression or Isolation Forest
+    is fitted here, so Validation/Test data can never influence calibration.
+    """
+    if not score_manifests:
+        raise ValueError("At least one scoring manifest is required")
+    calibration_path = Path(calibration_path)
+    raw_artifact = json.loads(calibration_path.read_text(encoding="utf-8"))
+    if not isinstance(raw_artifact, dict):
+        raise TypeError("Calibration artifact must be a JSON object")
+    if raw_artifact.get("calibration_version") != CALIBRATION_VERSION:
+        raise ValueError(
+            "Calibration artifact version "
+            f"{raw_artifact.get('calibration_version')!r} does not match "
+            f"{CALIBRATION_VERSION!r}; refit the calibration before scoring"
+        )
+    models_path = Path(str(raw_artifact.get("isolation_forest_models", "")))
+    if not models_path.is_file():
+        raise FileNotFoundError(f"Calibration models are missing: {models_path}")
+    if raw_artifact.get("isolation_forest_models_sha256") != file_sha256(models_path):
+        raise ValueError("Calibration models hash does not match the artifact")
+    recorded_train_manifest = Path(str(raw_artifact.get("train_manifest", "")))
+    if recorded_train_manifest.is_file() and raw_artifact.get(
+        "train_manifest_sha256"
+    ) != file_sha256(recorded_train_manifest):
+        raise ValueError("The calibration train manifest has changed since fitting")
+    forests = joblib.load(models_path)
+    if not isinstance(forests, dict) or "global" not in forests or "subjects" not in forests:
+        raise TypeError("Calibration models file has an unexpected structure")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    scored_paths: dict[str, str] = {}
+    score_hashes: dict[str, str] = {}
+    input_hashes: dict[str, str] = {}
+    for name, manifest_path in sorted(score_manifests.items()):
+        if not name.strip():
+            raise ValueError("Scoring manifest names cannot be empty")
+        path = output_dir / f"events_{name}_calibrated.csv"
+        atomic_write_csv(path, _score_rows(read_csv_rows(manifest_path), raw_artifact, forests))
+        scored_paths[name] = path.as_posix()
+        score_hashes[name] = file_sha256(path)
+        input_hashes[name] = file_sha256(manifest_path)
+    summary = {
+        "mode": "score_only",
+        "strategy": "frozen calibration reused; no regression or forest refitting",
+        "calibration_version": CALIBRATION_VERSION,
+        "calibration": calibration_path.as_posix(),
+        "calibration_sha256": file_sha256(calibration_path),
+        "isolation_forest_models_sha256": raw_artifact["isolation_forest_models_sha256"],
+        "score_manifest_sha256": input_hashes,
+        "scored_manifests": scored_paths,
+        "scored_manifest_sha256": score_hashes,
+    }
+    atomic_write_json(output_dir / "summary.json", summary)
+    return summary
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m seepat.training.calibration")
-    parser.add_argument("--train-manifest", type=Path, required=True)
+    parser.add_argument("--train-manifest", type=Path)
+    parser.add_argument("--calibration", type=Path)
     parser.add_argument("--score-manifest", action="append", default=[], metavar="NAME=PATH")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--min-subject-reference-frames", type=int, default=16)
@@ -390,16 +459,30 @@ def main() -> None:
         if not separator or not name or not text_path or name in manifests:
             raise ValueError("--score-manifest must be unique NAME=PATH values")
         manifests[name] = Path(text_path)
-    summary = fit_and_score_calibration(
-        args.train_manifest,
-        manifests,
-        args.output_dir,
-        CalibrationOptions(
-            args.min_subject_reference_frames,
-            args.isolation_trees,
-            args.seed,
-        ),
-    )
+    if args.calibration is not None:
+        if args.train_manifest is not None:
+            raise ValueError(
+                "Fit and score-only modes are exclusive; drop --train-manifest "
+                "when reusing --calibration"
+            )
+        summary = score_manifests_with_calibration(
+            args.calibration,
+            manifests,
+            args.output_dir,
+        )
+    else:
+        if args.train_manifest is None:
+            raise ValueError("--train-manifest is required to fit a calibration")
+        summary = fit_and_score_calibration(
+            args.train_manifest,
+            manifests,
+            args.output_dir,
+            CalibrationOptions(
+                args.min_subject_reference_frames,
+                args.isolation_trees,
+                args.seed,
+            ),
+        )
     print(json.dumps(summary, indent=2))
 
 

@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from seepat.artifacts import read_csv_rows
+from seepat.evidence import evidence_coverage as _evidence_coverage
+from seepat.evidence import evidence_feature_values
 
 FEATURE_FIELDS = (
     "normalized_minimum_closure",
@@ -77,7 +79,12 @@ def numeric_feature_values(row: dict[str, str]) -> tuple[list[float], list[bool]
 
 
 class MouthEventDataset:
-    """Loads fixed-length mouth clips and numerical bilabial features."""
+    """Loads fixed-length mouth clips and numerical bilabial features.
+
+    Each sample exposes both feature groups: the base motion features used by
+    the CNN-temporal baseline and the calibrated biological-alignment evidence
+    consumed by the hybrid fusion model (see :mod:`seepat.evidence`).
+    """
 
     def __init__(
         self,
@@ -126,6 +133,10 @@ class MouthEventDataset:
     def __len__(self) -> int:
         return len(self.rows)
 
+    def evidence_coverage(self) -> dict[str, float]:
+        """Fraction of events with each biological-alignment evidence field."""
+        return _evidence_coverage(self.rows)
+
     def __getitem__(self, index: int) -> dict[str, Any]:
         try:
             import cv2
@@ -162,12 +173,15 @@ class MouthEventDataset:
         array = np.ascontiguousarray(np.stack([frames[position] for position in indices]))
         video = torch.from_numpy(array).permute(3, 0, 1, 2).float().div_(255.0)
         feature_values, feature_mask = numeric_feature_values(row)
+        evidence_values, evidence_mask = evidence_feature_values(row)
 
         return {
             "video": video,
             "frame_mask": torch.tensor(frame_mask, dtype=torch.bool),
             "features": torch.tensor(feature_values, dtype=torch.float32),
             "feature_mask": torch.tensor(feature_mask, dtype=torch.bool),
+            "evidence_features": torch.tensor(evidence_values, dtype=torch.float32),
+            "evidence_feature_mask": torch.tensor(evidence_mask, dtype=torch.bool),
             "label": torch.tensor(int(row["class_id"]), dtype=torch.long),
             "event_id": row["event_id"],
             "video_id": row["video_id"],

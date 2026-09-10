@@ -9,3 +9,10 @@ speech and lip movement. It focuses on the bilabial consonants `/m/`, `/b/`, and
 `/p/`, which require the lips to close during pronunciation. A mismatch between
 the phoneme timing and the expected lip closure can provide evidence of video or
 audio manipulation.
+
+The workflow's numerical-calibration stage fits VILD normalization, feature
+correlations, closure regression, phoneme-viseme expectations, and Isolation
+Forest models using only genuine Train events. It writes calibrated Train and
+Validation manifests without using their labels at scoring time. Subjects with
+fewer than the configured number of genuine Train events use the global
+genuine-Train Isolation Forest fallback; the output records that scope per event.

@@ -18,6 +18,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from seepat.artifacts import atomic_write_json
 from seepat.models.cnn_temporal import EfficientNetTempCNNEventClassifier
+from seepat.models.fusion import FUSION_MODEL_NAME, HybridFusionEventClassifier
 from seepat.models.swin_baseline import SwinBaseEventClassifier, parameter_counts
 from seepat.training.dataset import MouthEventDataset
 from seepat.training.metrics import (
@@ -27,14 +28,17 @@ from seepat.training.metrics import (
 
 SWIN_BASE_MODEL = "swin3d_b"
 CNN_TEMPORAL_MODEL = "efficientnet_v2_s_tempcnn"
-SUPPORTED_MODELS = (SWIN_BASE_MODEL, CNN_TEMPORAL_MODEL)
+FUSION_MODEL = FUSION_MODEL_NAME
+SUPPORTED_MODELS = (SWIN_BASE_MODEL, CNN_TEMPORAL_MODEL, FUSION_MODEL)
 MODEL_CONTRACT_NAMES = {
     SWIN_BASE_MODEL: "torchvision.swin3d_b",
     CNN_TEMPORAL_MODEL: "torchvision.efficientnet_v2_s+tempcnn",
+    FUSION_MODEL: "seepat.hybrid_fusion.swin3d_b_tempcnn_evidence",
 }
 MODEL_TRAINING_VERSIONS = {
     SWIN_BASE_MODEL: "swin-baseline-v1",
     CNN_TEMPORAL_MODEL: "cnn-temporal-v1",
+    FUSION_MODEL: "hybrid-fusion-v1",
 }
 # Backward-compatible public name for existing Swin run records and callers.
 TRAINING_VERSION = MODEL_TRAINING_VERSIONS[SWIN_BASE_MODEL]
@@ -66,6 +70,11 @@ def build_event_classifier(
         )
     if model_name == CNN_TEMPORAL_MODEL:
         return EfficientNetTempCNNEventClassifier(
+            pretrained=pretrained,
+            freeze_backbone=freeze_backbone,
+        )
+    if model_name == FUSION_MODEL:
+        return HybridFusionEventClassifier(
             pretrained=pretrained,
             freeze_backbone=freeze_backbone,
         )
@@ -180,15 +189,35 @@ def _forward_logits(
     batch: dict[str, Any],
     device: torch.device,
 ) -> torch.Tensor:
-    if not bool(getattr(model, "uses_frame_mask", False)):
+    kwargs: dict[str, torch.Tensor] = {}
+    if bool(getattr(model, "uses_frame_mask", False)):
+        frame_mask = batch.get("frame_mask")
+        if not isinstance(frame_mask, torch.Tensor):
+            raise TypeError("A mask-aware model requires a tensor frame_mask in every batch")
+        kwargs["frame_mask"] = frame_mask.to(
+            device=device,
+            dtype=torch.bool,
+            non_blocking=True,
+        )
+    if bool(getattr(model, "uses_evidence_features", False)):
+        evidence = batch.get("evidence_features")
+        evidence_mask = batch.get("evidence_feature_mask")
+        if not isinstance(evidence, torch.Tensor) or not isinstance(
+            evidence_mask, torch.Tensor
+        ):
+            raise TypeError(
+                "An evidence-aware model requires evidence_features and "
+                "evidence_feature_mask tensors in every batch"
+            )
+        kwargs["features"] = evidence.to(device=device, non_blocking=True)
+        kwargs["feature_mask"] = evidence_mask.to(
+            device=device,
+            dtype=torch.bool,
+            non_blocking=True,
+        )
+    if not kwargs:
         return model(videos)
-    frame_mask = batch.get("frame_mask")
-    if not isinstance(frame_mask, torch.Tensor):
-        raise TypeError("A mask-aware model requires a tensor frame_mask in every batch")
-    return model(
-        videos,
-        frame_mask.to(device=device, dtype=torch.bool, non_blocking=True),
-    )
+    return model(videos, **kwargs)
 
 
 def _evaluate(
@@ -407,6 +436,16 @@ def train_model(
         )
     processed_train_events = 0
     processed_validation_events = 0
+    evidence_audit: dict[str, object] | None = None
+    if bool(getattr(model, "uses_evidence_features", False)):
+        train_coverage = getattr(train_dataset, "evidence_coverage", None)
+        validation_coverage = getattr(validation_dataset, "evidence_coverage", None)
+        if callable(train_coverage) and callable(validation_coverage):
+            evidence_audit = {
+                "fields": list(getattr(model, "evidence_fields", ())),
+                "train": train_coverage(),
+                "validation": validation_coverage(),
+            }
     run_record: dict[str, object] = {
         "status": "running",
         "run_type": "engineering_preflight" if limited_run else "training_experiment",
@@ -427,6 +466,7 @@ def train_model(
             ),
             "train_batches_per_epoch": train_batches_per_epoch,
             "validation_batches_per_epoch": validation_batches_per_epoch,
+            "evidence_coverage": evidence_audit,
         },
         "class_weights": class_weights.cpu().tolist() if class_weights is not None else None,
         "environment": {
@@ -665,6 +705,11 @@ def train_from_manifests(
         sequence_length=options.sequence_length,
         image_size=options.image_size,
     )
+    model = build_event_classifier(
+        model_name=model_name,
+        pretrained=pretrained and resume_from is None,
+        freeze_backbone=options.freeze_backbone,
+    )
     resume_contract = {
         "training_version": training_version_for_model(model_name),
         "model": model_contract_name(model_name),
@@ -674,14 +719,10 @@ def train_from_manifests(
         "sequence_length": options.sequence_length,
         "image_size": options.image_size,
         "class_weighting": options.class_weighting,
+        "evidence_fields": list(getattr(model, "evidence_fields", ())),
         "train_manifest_sha256": _sha256(train_manifest),
         "validation_manifest_sha256": _sha256(validation_manifest),
     }
-    model = build_event_classifier(
-        model_name=model_name,
-        pretrained=pretrained and resume_from is None,
-        freeze_backbone=options.freeze_backbone,
-    )
     return train_model(
         model=model,
         train_dataset=train_dataset,

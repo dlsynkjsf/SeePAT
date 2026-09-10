@@ -5,6 +5,7 @@ from argparse import ArgumentParser
 from pathlib import Path
 
 from seepat.data.archive import extract_manifest_videos
+from seepat.data.deepfake_eval import build_deepfake_eval_manifest
 from seepat.data.inventory import build_inventory
 from seepat.data.repository import (
     DATASET_SPLITS,
@@ -65,6 +66,22 @@ def create_parser() -> ArgumentParser:
     extract.add_argument("--output-dir", type=Path, required=True)
     extract.add_argument("--report", type=Path, required=True)
     extract.add_argument("--seven-zip", type=Path)
+
+    deepfake_eval = commands.add_parser(
+        "build-deepfake-eval-manifest",
+        help="Convert a Deepfake-Eval-2024 index into a pipeline manifest",
+    )
+    deepfake_eval.add_argument("--index", type=Path, required=True)
+    deepfake_eval.add_argument("--output", type=Path, required=True)
+    deepfake_eval.add_argument("--summary", type=Path)
+    deepfake_eval.add_argument("--split", default="test")
+    deepfake_eval.add_argument(
+        "--default-modality",
+        choices=("audio", "visual", "both"),
+        default="both",
+        help="Modality assumed for fake videos without a modality field",
+    )
+    deepfake_eval.add_argument("--sampling-seed", type=int, default=0)
     return parser
 
 
@@ -126,6 +143,18 @@ def main() -> None:
             seven_zip_path=args.seven_zip,
         )
         print(json.dumps(report, indent=2))
+        return
+
+    if args.command == "build-deepfake-eval-manifest":
+        summary = build_deepfake_eval_manifest(
+            index_path=args.index,
+            output_manifest=args.output,
+            summary_path=args.summary,
+            split=args.split,
+            default_modality=args.default_modality,
+            sampling_seed=args.sampling_seed,
+        )
+        print(json.dumps(summary, indent=2))
         return
 
     raise AssertionError(f"Unhandled command: {args.command}")

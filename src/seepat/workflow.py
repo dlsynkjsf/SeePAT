@@ -17,7 +17,11 @@ from seepat.preprocessing.contract import audit_preprocessing_contract
 from seepat.training.manifest import prepare_training_manifests
 
 WORKFLOW_VERSION = "local-pipeline-v2"
-SUPPORTED_TRAINING_MODELS = {"swin3d_b", "efficientnet_v2_s_tempcnn"}
+SUPPORTED_TRAINING_MODELS = {
+    "swin3d_b",
+    "efficientnet_v2_s_tempcnn",
+    "swin3d_b_vild_fusion",
+}
 
 
 @dataclass(frozen=True)

@@ -7,7 +7,11 @@ import pytest
 
 from seepat.artifacts import atomic_write_csv, atomic_write_gzip_json, file_sha256, read_csv_rows
 from seepat.preprocessing.vild import VILD_TRACE_VERSION
-from seepat.training.calibration import CalibrationOptions, fit_and_score_calibration
+from seepat.training.calibration import (
+    CalibrationOptions,
+    fit_and_score_calibration,
+    score_manifests_with_calibration,
+)
 
 
 def _write_trace(
@@ -147,3 +151,63 @@ def test_calibration_rejects_train_manifest_without_genuine_train_events(tmp_pat
 
     with pytest.raises(ValueError, match="genuine events"):
         fit_and_score_calibration(train_path, {"train": train_path}, tmp_path / "out")
+
+
+def test_score_only_calibration_reuses_frozen_models_without_refitting(
+    tmp_path: Path,
+) -> None:
+    train_path = tmp_path / "train.csv"
+    atomic_write_csv(
+        train_path,
+        [
+            _row(tmp_path, f"dense-{index}", event_minimum_raw_vild=8.0 + index * 0.1)
+            for index in range(4)
+        ],
+    )
+    calibration_dir = tmp_path / "calibration"
+    fit_and_score_calibration(
+        train_path,
+        {"train": train_path},
+        calibration_dir,
+        CalibrationOptions(isolation_trees=10, random_seed=9),
+    )
+    calibration_path = calibration_dir / "calibration.json"
+    models_path = calibration_dir / "isolation_forests.joblib"
+    calibration_hash = file_sha256(calibration_path)
+    models_hash = file_sha256(models_path)
+
+    eval_path = tmp_path / "eval.csv"
+    atomic_write_csv(
+        eval_path,
+        [_row(tmp_path, "eval-1", split="test", event_minimum_raw_vild=8.3)],
+    )
+    summary = score_manifests_with_calibration(
+        calibration_path,
+        {"test": eval_path},
+        tmp_path / "scored",
+    )
+
+    assert summary["mode"] == "score_only"
+    assert summary["strategy"].startswith("frozen calibration reused")
+    assert file_sha256(calibration_path) == calibration_hash
+    assert file_sha256(models_path) == models_hash
+    scored = read_csv_rows(tmp_path / "scored" / "events_test_calibrated.csv")
+    assert scored[0]["event_id"] == "eval-1"
+    assert scored[0]["vild_regression_residual_px"]
+    assert scored[0]["phoneme_viseme_residual_z"]
+    assert scored[0]["isolation_forest_anomaly_score"]
+
+
+def test_score_only_calibration_rejects_unsupported_version(tmp_path: Path) -> None:
+    calibration_path = tmp_path / "calibration.json"
+    calibration_path.write_text(
+        json.dumps({"calibration_version": "vild-calibration-v0"}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="does not match"):
+        score_manifests_with_calibration(
+            calibration_path,
+            {"test": tmp_path / "missing.csv"},
+            tmp_path / "out",
+        )
