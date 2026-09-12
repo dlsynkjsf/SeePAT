@@ -1,12 +1,81 @@
+# =============================================================================
+# SeePAT whole-pipeline workflow - scaled run (AV++ Train 5,000 / Val 1,000).
+#
+# Stage 0 - AV++ dataset subsetting. NOT executed by seepat-workflow; run these
+# once from the repo root (skip any step whose outputs already exist):
+#
+#   seepat-data build-inventory \
+#     --metadata data/raw/avpp/train_metadata.json \
+#     --metadata data/raw/avpp/val_metadata.json \
+#     --database data/manifests/avpp_inventory.sqlite \
+#     --summary outputs/avpp_inventory_summary.json
+#
+#   seepat-data sample-training-canary \
+#     --database data/manifests/avpp_inventory.sqlite \
+#     --output data/manifests/train_subset5000.csv \
+#     --summary outputs/train_subset5000_sample_summary.json \
+#     --split train --per-category 1250 --seed 20260824 --exclude-split val
+#
+#   seepat-data sample-pilot \
+#     --database data/manifests/avpp_inventory.sqlite \
+#     --output data/manifests/val_subset1000.csv \
+#     --split val --per-category 250 --seed 20260822
+#
+#   seepat-data extract-pilot \
+#     --archive /path/to/avpp_train.7z.001 \
+#     --manifest data/manifests/train_subset5000.csv \
+#     --output-dir data/extracted/avpp/train-subset5000 \
+#     --report outputs/extract_train_subset5000.json
+#
+#   seepat-data extract-pilot \
+#     --archive /path/to/avpp_val.7z.001 \
+#     --manifest data/manifests/val_subset1000.csv \
+#     --output-dir data/extracted/avpp/val-subset1000 \
+#     --report outputs/extract_val_subset1000.json
+#
+# Keep dataset.extracted_root in configs/train_scaled.yaml / val_scaled.yaml in
+# sync with each report's `extracted_data_root` (the archive adds a root folder).
+#
+# Stages 1-3 (preprocess + training manifests -> calibration -> model training)
+# run with:
+#   seepat-workflow --config configs/workflow_scaled.yaml
+# =============================================================================
+
+dataset_subsetting:  # reference parameters for stage 0 (not read by seepat-workflow)
+  inventory_database: data/manifests/avpp_inventory.sqlite
+  train:
+    command: sample-training-canary
+    manifest: data/manifests/train_subset5000.csv
+    summary: outputs/train_subset5000_sample_summary.json
+    split: train
+    per_category: 1250
+    seed: 20260824
+    exclude_split: val
+  val:
+    command: sample-pilot
+    manifest: data/manifests/val_subset1000.csv
+    split: val
+    per_category: 250
+    seed: 20260822
+  extraction:
+    train:
+      archive: /path/to/avpp_train.7z.001
+      output_dir: data/extracted/avpp/train-subset5000
+      report: outputs/extract_train_subset5000.json
+    val:
+      archive: /path/to/avpp_val.7z.001
+      output_dir: data/extracted/avpp/val-subset1000
+      report: outputs/extract_val_subset1000.json
+
 report: outputs/workflow_scaled_summary.json
 
 jobs:
   - name: train-subset5000
-    pipeline_config: configs/train_subset5000.yaml
+    pipeline_config: configs/train_scaled.yaml
     manifest_output_dir: data/training/train-subset5000
 
   - name: val-subset1000
-    pipeline_config: configs/val_subset1000.yaml
+    pipeline_config: configs/val_scaled.yaml
     manifest_output_dir: data/training/val-subset1000
 
 numerical_calibration:
