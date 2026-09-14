@@ -21,7 +21,7 @@ sampling:
   require_unique_originals: true
 
 preprocessing:
-  output_dir: outputs/scaled/train
+  output_dir: outputs/train-subset5000
   ffmpeg_path: null
   ffprobe_path: null
   whisper_model: base.en

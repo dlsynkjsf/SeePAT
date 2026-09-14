@@ -1,0 +1,25 @@
+# Engineering pilot only: 10 deterministic Train + 10 Validation input videos.
+# Reads existing manifests and source video frames; never runs preprocessing/training.
+report: outputs/calibration_pilot/workflow_summary.json
+jobs: []
+trace_augmentation:
+  - name: pilot-train-traces
+    manifest: data/training/train-subset5000/events_train.csv
+    extracted_root: data/extracted/avpp/train-subset5000/train
+    output_dir: outputs/calibration_pilot/train
+    max_videos: 10
+  - name: pilot-val-traces
+    manifest: data/training/val-subset1000/events_val.csv
+    extracted_root: data/extracted/avpp/val-subset1000/val
+    output_dir: outputs/calibration_pilot/val
+    max_videos: 10
+numerical_calibration:
+  name: pilot-per-video-calibration
+  train_manifest: outputs/calibration_pilot/train/events_augmented.csv
+  score_manifests:
+    train: outputs/calibration_pilot/train/events_augmented.csv
+    val: outputs/calibration_pilot/val/events_augmented.csv
+  output_dir: outputs/calibration_pilot/calibration
+  min_video_reference_frames: 16
+  isolation_trees: 100
+  random_seed: 20260908

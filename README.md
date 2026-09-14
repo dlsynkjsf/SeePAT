@@ -10,9 +10,11 @@ speech and lip movement. It focuses on the bilabial consonants `/m/`, `/b/`, and
 the phoneme timing and the expected lip closure can provide evidence of video or
 audio manipulation.
 
-The workflow's numerical-calibration stage fits VILD normalization, feature
-correlations, closure regression, phoneme-viseme expectations, and Isolation
-Forest models using only genuine Train events. It writes calibrated Train and
-Validation manifests without using their labels at scoring time. Subjects with
-fewer than the configured number of genuine Train events use the global
-genuine-Train Isolation Forest fallback; the output records that scope per event.
+The workflow preserves existing preprocessing and adds separate, verified raw
+VILD and face-size measurements. Scale regression and Pearson analysis use
+label-independent Train references; phoneme expectations use genuine Train
+events. Each input video fits its own Isolation Forest from its eligible
+non-speech frames. Insufficient references remain masked, with no pooled
+fallback. Train parameters stay frozen when scoring Validation or later Test
+inputs. The implementation passes unit tests; real-data calibration and final
+multimodal fusion still require validation.

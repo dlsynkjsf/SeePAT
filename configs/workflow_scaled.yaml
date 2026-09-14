@@ -78,14 +78,24 @@ jobs:
     pipeline_config: configs/val_scaled.yaml
     manifest_output_dir: data/training/val-subset1000
 
+trace_augmentation:
+  - name: train-vild-augmentation
+    manifest: data/training/train-subset5000/events_train.csv
+    extracted_root: data/extracted/avpp/train-subset5000/train
+    output_dir: outputs/trace_augmentation/train
+  - name: val-vild-augmentation
+    manifest: data/training/val-subset1000/events_val.csv
+    extracted_root: data/extracted/avpp/val-subset1000/val
+    output_dir: outputs/trace_augmentation/val
+
 numerical_calibration:
   name: guarded-vild-calibration
-  train_manifest: data/training/train-subset5000/events_train.csv
+  train_manifest: outputs/trace_augmentation/train/events_augmented.csv
   score_manifests:
-    train: data/training/train-subset5000/events_train.csv
-    val: data/training/val-subset1000/events_val.csv
-  output_dir: outputs/numerical_calibration/guarded_v1
-  min_subject_reference_frames: 16
+    train: outputs/trace_augmentation/train/events_augmented.csv
+    val: outputs/trace_augmentation/val/events_augmented.csv
+  output_dir: outputs/numerical_calibration/guarded_per_video_v3
+  min_video_reference_frames: 16
   isolation_trees: 100
   random_seed: 20260908
 

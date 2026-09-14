@@ -163,3 +163,22 @@ def test_format_workflow_progress_is_compact() -> None:
     assert "workflow stages=5/6 current" in text
     assert "swin=current 1/1 epochs" in text
     assert "cnn=running 0/1 epochs" in text
+
+
+def test_progress_tracks_augmentation_and_calibration_until_both_are_current(tmp_path, monkeypatch):
+    from seepat.preprocessing.augmentation import TraceAugmentationJob
+    from seepat.workflow import NumericalCalibrationJob
+
+    augmentation = TraceAugmentationJob("augment", tmp_path / "events.csv", tmp_path, tmp_path / "aug", 10)
+    calibration = NumericalCalibrationJob("calibrate", tmp_path / "train.csv",
+                                          (("val", tmp_path / "val.csv"),), tmp_path / "cal")
+    settings = WorkflowSettings((), (), tmp_path / "summary.json", (calibration,), (augmentation,))
+    monkeypatch.setattr("seepat.workflow.load_workflow_settings", lambda p: settings)
+    monkeypatch.setattr("seepat.preprocessing.augmentation.augmentation_outputs_are_current", lambda j: True)
+    monkeypatch.setattr("seepat.workflow.numerical_calibration_outputs_are_current", lambda j: False)
+    progress = read_workflow_progress(tmp_path / "workflow.yaml")
+    assert progress["stages_current"] == 1 and progress["stages_total"] == 2
+    assert not progress["all_current"]
+    assert "calibrate=pending" in format_workflow_progress(progress)
+    monkeypatch.setattr("seepat.workflow.numerical_calibration_outputs_are_current", lambda j: True)
+    assert read_workflow_progress(tmp_path / "workflow.yaml")["all_current"]

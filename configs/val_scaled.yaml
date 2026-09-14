@@ -21,7 +21,7 @@ sampling:
   require_unique_originals: true
 
 preprocessing:
-  output_dir: outputs/scaled/val
+  output_dir: outputs/val-subset1000
   ffmpeg_path: null
   ffprobe_path: null
   whisper_model: base.en

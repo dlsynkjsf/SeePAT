@@ -13,6 +13,7 @@ import yaml
 from seepat.artifacts import atomic_write_json, read_csv_rows, stable_id
 from seepat.config import PipelineSettings, load_pipeline_settings
 from seepat.pipeline import PIPELINE_VERSION, run_pipeline
+from seepat.preprocessing.augmentation import TraceAugmentationJob, run_trace_augmentation
 from seepat.preprocessing.contract import audit_preprocessing_contract
 from seepat.training.manifest import prepare_training_manifests
 
@@ -50,7 +51,7 @@ class NumericalCalibrationJob:
     train_manifest: Path
     score_manifests: tuple[tuple[str, Path], ...]
     output_dir: Path
-    min_subject_reference_frames: int = 16
+    min_video_reference_frames: int = 16
     isolation_trees: int = 100
     random_seed: int = 20260908
 
@@ -61,6 +62,7 @@ class WorkflowSettings:
     model_training_jobs: tuple[ModelTrainingJob, ...]
     report_path: Path
     numerical_calibration_jobs: tuple[NumericalCalibrationJob, ...] = ()
+    trace_augmentation_jobs: tuple[TraceAugmentationJob, ...] = ()
 
 
 def _require_mapping(value: object, description: str) -> dict[str, Any]:
@@ -74,9 +76,9 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
         raw = yaml.safe_load(stream)
     config = _require_mapping(raw, "Workflow configuration")
 
-    raw_jobs = config.get("jobs")
-    if not isinstance(raw_jobs, list) or not raw_jobs:
-        raise ValueError("Workflow configuration must contain at least one job")
+    raw_jobs = config.get("jobs", [])
+    if not isinstance(raw_jobs, list):
+        raise TypeError("Workflow jobs must be a list")
 
     jobs: list[WorkflowJob] = []
     names: set[str] = set()
@@ -191,8 +193,8 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
                 train_manifest=Path(str(calibration["train_manifest"])),
                 score_manifests=score_manifests,
                 output_dir=Path(str(calibration["output_dir"])),
-                min_subject_reference_frames=int(
-                    calibration.get("min_subject_reference_frames", 16)
+                min_video_reference_frames=int(
+                    calibration.get("min_video_reference_frames", 16)
                 ),
                 isolation_trees=int(calibration.get("isolation_trees", 100)),
                 random_seed=int(calibration.get("random_seed", 20260908)),
@@ -215,12 +217,30 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
         calibration_output_dirs.add(calibration_job.output_dir)
         numerical_calibration_jobs.append(calibration_job)
 
+    augmentation_jobs = []
+    for raw_job in config.get("trace_augmentation", []):
+        job = _require_mapping(raw_job, "Trace augmentation job")
+        augmentation = TraceAugmentationJob(
+            name=str(job["name"]), manifest=Path(job["manifest"]),
+            extracted_root=Path(job["extracted_root"]), output_dir=Path(job["output_dir"]),
+            max_videos=job.get("max_videos"),
+            normalized_tolerance=float(job.get("normalized_tolerance", 1e-5)),
+            timestamp_tolerance_s=float(job.get("timestamp_tolerance_s", 1e-6)),
+        )
+        augmentation.validate()
+        if any(old.name == augmentation.name or old.output_dir == augmentation.output_dir
+               for old in augmentation_jobs):
+            raise ValueError("Duplicate trace augmentation name or output directory")
+        augmentation_jobs.append(augmentation)
+    if not (jobs or augmentation_jobs or numerical_calibration_jobs or model_training_jobs):
+        raise ValueError("Workflow configuration must contain at least one job")
     report_path = Path(str(config.get("report", "outputs/workflow_summary.json")))
     return WorkflowSettings(
         jobs=tuple(jobs),
         model_training_jobs=tuple(model_training_jobs),
         report_path=report_path,
         numerical_calibration_jobs=tuple(numerical_calibration_jobs),
+        trace_augmentation_jobs=tuple(augmentation_jobs),
     )
 
 
@@ -539,58 +559,12 @@ def run_model_training_job(job: ModelTrainingJob) -> dict[str, object]:
 
 
 def numerical_calibration_outputs_are_current(job: NumericalCalibrationJob) -> bool:
-    required = (
-        job.train_manifest,
-        job.output_dir / "summary.json",
-        job.output_dir / "calibration.json",
-        job.output_dir / "isolation_forests.joblib",
+    from seepat.training.calibration import CalibrationOptions, calibration_outputs_are_current
+
+    return calibration_outputs_are_current(
+        job.train_manifest, dict(job.score_manifests), job.output_dir,
+        CalibrationOptions(job.min_video_reference_frames, job.isolation_trees, job.random_seed),
     )
-    if not all(path.is_file() for path in required) or not all(
-        path.is_file() for _, path in job.score_manifests
-    ):
-        return False
-    try:
-        summary = _read_json(job.output_dir / "summary.json")
-        if summary.get("train_manifest_sha256") != _sha256(job.train_manifest):
-            return False
-        if summary.get("calibration_sha256") != _sha256(
-            job.output_dir / "calibration.json"
-        ):
-            return False
-        calibration = _read_json(job.output_dir / "calibration.json")
-        if calibration.get("isolation_forest_models_sha256") != _sha256(
-            job.output_dir / "isolation_forests.joblib"
-        ):
-            return False
-        recorded_options = _require_mapping(
-            summary.get("options"), "Calibration options"
-        )
-        if recorded_options != {
-            "min_subject_reference_frames": job.min_subject_reference_frames,
-            "isolation_trees": job.isolation_trees,
-            "random_seed": job.random_seed,
-        }:
-            return False
-        recorded_inputs = _require_mapping(
-            summary.get("score_manifest_sha256"), "Calibration score input hashes"
-        )
-        recorded_outputs = _require_mapping(
-            summary.get("scored_manifest_sha256"), "Calibrated manifest hashes"
-        )
-        recorded_paths = _require_mapping(
-            summary.get("scored_manifests"), "Calibrated manifest paths"
-        )
-        for name, input_path in job.score_manifests:
-            output_path = Path(str(recorded_paths.get(name, "")))
-            if (
-                recorded_inputs.get(name) != _sha256(input_path)
-                or not output_path.is_file()
-                or recorded_outputs.get(name) != _sha256(output_path)
-            ):
-                return False
-        return summary.get("reference_frames", 0) >= 2
-    except (OSError, TypeError, ValueError, json.JSONDecodeError):
-        return False
 
 
 def run_numerical_calibration_job(job: NumericalCalibrationJob) -> dict[str, object]:
@@ -603,13 +577,13 @@ def run_numerical_calibration_job(job: NumericalCalibrationJob) -> dict[str, obj
         }
     from seepat.training.calibration import CalibrationOptions, fit_and_score_calibration
 
-    print(f"[{job.name}] numerical calibration: fitting Train-only evidence")
+    print(f"[{job.name}] numerical calibration: Train regression and independent input-video forests")
     summary = fit_and_score_calibration(
         train_manifest=job.train_manifest,
         score_manifests=dict(job.score_manifests),
         output_dir=job.output_dir,
         options=CalibrationOptions(
-            min_subject_reference_frames=job.min_subject_reference_frames,
+            min_video_reference_frames=job.min_video_reference_frames,
             isolation_trees=job.isolation_trees,
             random_seed=job.random_seed,
         ),
@@ -628,6 +602,10 @@ def run_workflow(
         "config": config_path.as_posix(),
         "jobs": jobs,
     }
+    if settings.trace_augmentation_jobs:
+        report["trace_augmentation"] = [
+            run_trace_augmentation(job) for job in settings.trace_augmentation_jobs
+        ]
     if settings.numerical_calibration_jobs:
         report["numerical_calibration"] = [
             run_numerical_calibration_job(job)

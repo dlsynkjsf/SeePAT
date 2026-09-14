@@ -8,6 +8,7 @@ import pytest
 from seepat.artifacts import atomic_write_csv, atomic_write_json, file_sha256, stable_id
 from seepat.config import load_pipeline_settings
 from seepat.pipeline import PIPELINE_VERSION
+from seepat.preprocessing.augmentation import TraceAugmentationJob
 from seepat.workflow import (
     ModelTrainingJob,
     NumericalCalibrationJob,
@@ -134,7 +135,7 @@ numerical_calibration:
     train: train.csv
     val: val.csv
   output_dir: calibration
-  min_subject_reference_frames: 4
+  min_video_reference_frames: 4
   isolation_trees: 10
   random_seed: 9
 """.strip()
@@ -153,7 +154,7 @@ numerical_calibration:
                 ("val", Path("val.csv")),
             ),
             output_dir=Path("calibration"),
-            min_subject_reference_frames=4,
+            min_video_reference_frames=4,
             isolation_trees=10,
             random_seed=9,
         ),
@@ -537,3 +538,36 @@ def test_workflow_runs_model_training_after_preparation(tmp_path: Path, monkeypa
         {"name": "local-preflight"},
         {"name": "local-cnn-preflight"},
     ]
+
+
+def test_scaled_configs_keep_the_completed_guarded_cache_contract():
+    assert PIPELINE_VERSION == "pilot-v4"
+    expected = {
+        "train_scaled": ("outputs/train-subset5000", "a1e06db8beb9f89a4b58639fc2d511237ec44e8419515a742439f005af56fb3e"),
+        "val_scaled": ("outputs/val-subset1000", "eea9cb4739433d331e238306d2f64913dae58fcb014e7ab31deeb74a707642a7"),
+    }
+    for name, (output, signature) in expected.items():
+        settings = load_pipeline_settings(Path("configs") / f"{name}.yaml", PIPELINE_VERSION)
+        assert settings.preprocessing.output_dir == Path(output)
+        assert settings.cache_signature == signature
+
+
+def test_workflow_orders_augmentation_before_calibration_and_preserves_model_jobs(tmp_path, monkeypatch):
+    augmentation = TraceAugmentationJob("augment", tmp_path / "events.csv", tmp_path, tmp_path / "aug")
+    calibration = NumericalCalibrationJob("calibrate", tmp_path / "train.csv",
+                                          (("val", tmp_path / "val.csv"),), tmp_path / "cal")
+    model = ModelTrainingJob("swin", tmp_path / "train.csv", tmp_path / "val.csv",
+                             tmp_path / "model", tmp_path, "cpu", False, {})
+    settings = WorkflowSettings((), (model,), tmp_path / "report.json", (calibration,), (augmentation,))
+    calls = []
+    monkeypatch.setattr("seepat.workflow.load_workflow_settings", lambda p: settings)
+    for function in ("run_trace_augmentation", "run_numerical_calibration_job", "run_model_training_job"):
+        monkeypatch.setattr("seepat.workflow." + function, lambda job: calls.append(job.name))
+    run_workflow(tmp_path / "workflow.yaml")
+    assert calls == ["augment", "calibrate", "swin"]
+
+
+def test_calibration_pilot_has_no_preprocessing_or_model_jobs():
+    settings = load_workflow_settings(Path("configs/workflow_calibration_pilot.yaml"))
+    assert not settings.jobs and not settings.model_training_jobs
+    assert [job.max_videos for job in settings.trace_augmentation_jobs] == [10, 10]

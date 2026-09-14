@@ -108,6 +108,7 @@ def read_workflow_progress(config_path: Path) -> dict[str, object]:
     from seepat.workflow import (
         load_workflow_settings,
         model_training_outputs_are_current,
+        numerical_calibration_outputs_are_current,
         preprocessing_outputs_are_current,
         training_outputs_are_current,
     )
@@ -165,7 +166,36 @@ def read_workflow_progress(config_path: Path) -> dict[str, object]:
             }
         )
 
-    total_stages = 2 * len(settings.jobs) + len(settings.model_training_jobs)
+    from seepat.preprocessing.augmentation import augmentation_outputs_are_current
+
+    evidence_stages = []
+    for job in settings.trace_augmentation_jobs:
+        current = augmentation_outputs_are_current(job)
+        record = (_read_run_record(job.output_dir / "progress.json")
+                  or _read_run_record(job.output_dir / "summary.json"))
+        current_stages += int(current)
+        evidence_stages.append({
+            "name": job.name, "status": "current" if current else (
+                "stale" if record.get("status") == "complete" else record.get("status", "pending")
+            ),
+            "videos_finished": record.get("videos_finished", 0),
+            "videos_requested": record.get("videos_requested", job.max_videos or 0),
+        })
+    for job in settings.numerical_calibration_jobs:
+        current = numerical_calibration_outputs_are_current(job)
+        record = _read_run_record(job.output_dir / "progress.json")
+        current_stages += int(current)
+        evidence_stages.append({
+            "name": job.name,
+            "status": "current" if current else (
+                "stale" if record.get("status") == "complete" else record.get("status", "pending")
+            ),
+            "videos_finished": record.get("videos_finished", 0),
+            "videos_requested": record.get("videos_requested", 0),
+            "manifest": record.get("manifest", ""),
+        })
+    total_stages = (2 * len(settings.jobs) + len(settings.model_training_jobs)
+                    + len(evidence_stages))
     return {
         "workflow_config": config_path.as_posix(),
         "stages_current": current_stages,
@@ -173,6 +203,7 @@ def read_workflow_progress(config_path: Path) -> dict[str, object]:
         "all_current": current_stages == total_stages,
         "preparation": preparation,
         "model_training": model_training,
+        "evidence_stages": evidence_stages,
     }
 
 
@@ -193,10 +224,16 @@ def format_workflow_progress(progress: dict[str, object]) -> str:
             values.append(f"{model.get('name')}={status}{epochs}")
         if values:
             model_text = " | " + ", ".join(values)
+    evidence_text = "".join(
+        f" | {stage['name']}={stage['status']} "
+        f"{stage.get('manifest', '')} "
+        f"{stage['videos_finished']}/{stage['videos_requested']} videos"
+        for stage in progress.get("evidence_stages", [])
+    )
     return (
         f"[{timestamp}] workflow stages="
         f"{progress['stages_current']}/{progress['stages_total']} current"
-        f"{model_text}"
+        f"{model_text}{evidence_text}"
     )
 
 
