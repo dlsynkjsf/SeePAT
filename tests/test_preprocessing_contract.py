@@ -103,12 +103,19 @@ def test_contract_audit_verifies_trace_events_frames_and_references(
         },
     )
 
-    report = audit_preprocessing_contract(output_dir, project_root=tmp_path)
+    updates = []
+    report = audit_preprocessing_contract(
+        output_dir, project_root=tmp_path, progress=lambda *args: updates.append(args),
+    )
 
     assert report["status"] == "passed"
     assert report["trace_videos"] == 1
     assert report["eligible_events"] == 1
     assert report["reference_windows"] == 1
+    assert updates == [
+        ("audit preprocessing contract", 0, 1, "video-1"),
+        ("audit preprocessing contract", 1, 1, ""),
+    ]
 
     events = read_csv_rows(output_dir / "bilabial_events.csv")
     events[0]["mouth_crop_frame_indices_json"] = "[1,0]"

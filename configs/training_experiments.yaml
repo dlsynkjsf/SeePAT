@@ -1,0 +1,50 @@
+# First experiment: frozen pretrained encoders; train the heads, TempCNN and fusion.
+# Niko launches these jobs. Hardware readiness is not established by this file.
+# Full runs require the matching resumed readiness checks to pass first.
+report: outputs/workflow_experiments_summary.json
+model_training:
+  - name: experiment-swin
+    model: swin3d_b
+    train_manifest: &train outputs/numerical_calibration/guarded_per_video_v3/events_train_calibrated.csv
+    validation_manifest: &val outputs/numerical_calibration/guarded_per_video_v3/events_val_calibrated.csv
+    output_dir: outputs/training/experiments_guarded_base_en_v1/swin
+    project_root: .
+    device: cuda
+    pretrained: true
+    readiness_dir: outputs/training/readiness_guarded_base_en_v1/swin
+    options: &options
+      epochs: 10
+      batch_size: 1
+      workers: 0
+      learning_rate: 0.0001
+      weight_decay: 0.01
+      gradient_accumulation_steps: 4
+      sequence_length: 16
+      image_size: 224
+      seed: 20260916
+      amp: false
+      freeze_backbone: true
+      class_weighting: balanced_global
+      early_stopping_patience: 3
+      max_train_batches: null
+      max_validation_batches: null
+  - name: experiment-cnn-temporal
+    model: efficientnet_v2_s_tempcnn
+    train_manifest: *train
+    validation_manifest: *val
+    output_dir: outputs/training/experiments_guarded_base_en_v1/cnn_temporal
+    project_root: .
+    device: cuda
+    pretrained: true
+    readiness_dir: outputs/training/readiness_guarded_base_en_v1/cnn_temporal
+    options: *options
+  - name: experiment-fusion
+    model: swin3d_b_vild_fusion
+    train_manifest: *train
+    validation_manifest: *val
+    output_dir: outputs/training/experiments_guarded_base_en_v1/fusion
+    project_root: .
+    device: cuda
+    pretrained: true
+    readiness_dir: outputs/training/readiness_guarded_base_en_v1/fusion
+    options: *options

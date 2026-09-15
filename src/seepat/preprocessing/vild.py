@@ -20,7 +20,7 @@ def load_vild_trace(path: Path, expected_sha256: str | None = None) -> dict[str,
     artifact = read_gzip_json(path)
     if not isinstance(artifact, dict):
         raise TypeError(f"VILD trace must contain a JSON object: {path}")
-    if artifact.get("artifact_version") != VILD_TRACE_VERSION:
+    if artifact.get("artifact_version") not in {VILD_TRACE_VERSION, "vild-trace-v2"}:
         raise ValueError(f"Unsupported VILD trace version in {path}")
     frames = artifact.get("frames")
     event_windows = artifact.get("bilabial_event_windows")

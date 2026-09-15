@@ -105,6 +105,62 @@ def test_source_group_overlap_finds_leakage() -> None:
     assert overlap == {"source-b"}
 
 
+def _imbalanced_dataset():
+    dataset = TinyEventDataset("imbalanced-train")
+    dataset.rows[2]["class_id"] = "0"
+    dataset.samples[2]["label"] = torch.tensor(0)
+    dataset.samples[2]["video_label"] = torch.tensor(0)
+    dataset.samples[2]["video"].zero_()
+    return dataset
+
+
+def test_readiness_sampling_is_bounded_deterministic_and_contains_both_classes():
+    dataset = _imbalanced_dataset()
+    samples = []
+    for _ in range(2):
+        loader = train_module._loader(dataset, 1, 0, torch.device("cpu"), False, 31, balanced_limit=2)
+        samples.append([batch["label"].item() for batch in loader])
+    assert samples[0] == samples[1] == [0, 1]
+    ordinary = train_module._loader(dataset, 1, 0, torch.device("cpu"), False, 31)
+    assert [batch["label"].item() for batch in ordinary] == [0, 0, 0, 1]
+
+
+@pytest.mark.parametrize("weighting", ["balanced", "balanced_global"])
+def test_batch_one_weighting_retains_minority_contribution(tmp_path, weighting):
+    model = TinyVideoClassifier()
+    for parameter in model.parameters():
+        nn.init.zeros_(parameter)
+    options = TrainingOptions(epochs=1, batch_size=1, gradient_accumulation_steps=4,
+                              class_weighting=weighting, amp=False, weight_decay=0)
+    train_model(model, _imbalanced_dataset(), TinyEventDataset("val"), tmp_path,
+                options, torch.device("cpu"), {"model": "tiny", "class_weighting": weighting})
+    checkpoint = torch.load(tmp_path / "checkpoint_last.pt", weights_only=False)
+    bias_moment = checkpoint["optimizer_state"]["state"][1]["exp_avg"]
+    # At equal logits, globally balanced real/fake contributions cancel the bias
+    # gradient. Per-batch normalization instead treats the 3:1 inventory as unweighted.
+    expected = 0.0 if weighting == "balanced_global" else 0.025
+    assert float(bias_moment.abs().max()) == pytest.approx(expected, abs=1e-7)
+
+
+@pytest.mark.parametrize("batch_size", [1, 2])
+def test_global_weighting_accumulation_matches_full_batch_with_short_tail(tmp_path, batch_size):
+    dataset = _imbalanced_dataset()
+    dataset.rows.pop(0)
+    dataset.samples.pop(0)
+    states = []
+    for index, (size, accumulation) in enumerate(((3, 1), (batch_size, 4))):
+        torch.manual_seed(19)
+        model = TinyVideoClassifier()
+        directory = tmp_path / str(index)
+        options = TrainingOptions(epochs=1, batch_size=size, gradient_accumulation_steps=accumulation,
+                                  class_weighting="balanced_global", amp=False, weight_decay=0)
+        train_model(model, dataset, TinyEventDataset("val"), directory,
+                    options, torch.device("cpu"), {"model": "tiny"})
+        states.append(torch.load(directory / "checkpoint_last.pt", weights_only=False)["optimizer_state"]["state"])
+    for key in states[0]:
+        torch.testing.assert_close(states[0][key]["exp_avg"], states[1][key]["exp_avg"], atol=1e-7, rtol=1e-6)
+
+
 def test_model_contracts_distinguish_swin_and_cnn_temporal() -> None:
     assert model_contract_name(SWIN_BASE_MODEL) == "torchvision.swin3d_b"
     assert model_contract_name(CNN_TEMPORAL_MODEL).endswith("+tempcnn")
@@ -122,6 +178,54 @@ def test_preflight_batch_limits_must_be_paired_and_positive() -> None:
 
     with pytest.raises(ValueError, match="must be positive"):
         TrainingOptions(max_train_batches=0, max_validation_batches=1).validate()
+
+
+@pytest.mark.parametrize("overflow_batches", [1, 2])
+def test_amp_overflow_counts_only_updates_and_rejects_empty_training(
+    tmp_path: Path, monkeypatch, overflow_batches: int,
+) -> None:
+    # Exercise the real scaler's skipped-step behavior on CPU without a GPU job.
+    scaler = torch.amp.GradScaler("cpu", init_scale=8.0)
+    monkeypatch.setattr(torch.amp, "GradScaler", lambda *args, **kwargs: scaler)
+    model = TinyVideoClassifier()
+    original_weight = model.classifier.weight.detach().clone()
+    backward_calls = 0
+
+    def overflow(gradient):
+        nonlocal backward_calls
+        backward_calls += 1
+        return torch.full_like(gradient, float("inf")) if backward_calls <= overflow_batches else gradient
+
+    model.classifier.weight.register_hook(overflow)
+    arguments = {
+        "model": model,
+        "train_dataset": TinyEventDataset("train"),
+        "validation_dataset": TinyEventDataset("val"),
+        "output_dir": tmp_path,
+        "options": TrainingOptions(
+            epochs=1, batch_size=2, max_train_batches=2, max_validation_batches=1,
+        ),
+        "device": torch.device("cpu"),
+        "resume_contract": {"model": "tiny"},
+    }
+    if overflow_batches == 2:
+        with pytest.raises(RuntimeError, match="No optimizer updates"):
+            train_model(**arguments)
+        report = json.loads((tmp_path / "run.json").read_text())
+        assert report["status"] == "failed"
+        assert report["global_step"] == 0
+        assert torch.equal(model.classifier.weight, original_weight)
+        assert not (tmp_path / "checkpoint_last.pt").exists()
+    else:
+        report = train_model(**arguments)
+        assert report["status"] == "complete"
+        assert report["global_step"] == 1
+        assert not torch.equal(model.classifier.weight, original_weight)
+        checkpoint = torch.load(tmp_path / "checkpoint_last.pt", weights_only=False)
+        assert {int(s["step"]) for s in checkpoint["optimizer_state"]["state"].values()} == {1}
+        assert checkpoint["history"][0]["skipped_optimizer_steps"] == 1
+    assert report["optimizer_steps"] == 2 - overflow_batches
+    assert report["skipped_optimizer_steps"] == overflow_batches
 
 
 def test_training_writes_metrics_and_resumes_at_next_epoch(tmp_path: Path) -> None:

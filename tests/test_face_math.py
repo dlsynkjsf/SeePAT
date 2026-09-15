@@ -85,7 +85,13 @@ def test_full_video_trace_keeps_invalid_and_multiple_face_frames(tmp_path) -> No
         },
     )()
     analyzer._create_face_mesh = lambda: FakeMesh()
-    measurements = iter([(1, 0.1, None), (0, None, None), (2, None, None)])
+    measurements = iter(
+        [
+            (1, 0.1, None, 2.0, 10.0),
+            (0, None, None, None, None),
+            (2, None, None, None, None),
+        ]
+    )
     analyzer._measure_frame = lambda frame, mesh: next(measurements)
 
     trace = analyzer.trace_video(tmp_path / "video.mp4", fps=10.0)

@@ -137,19 +137,23 @@ class MouthEventAnalyzer:
         result = mesh.process(self.cv2.cvtColor(frame, self.cv2.COLOR_BGR2RGB))
         faces = result.multi_face_landmarks or []
         if len(faces) != 1:
-            return len(faces), None, None
+            return len(faces), None, None, None, None
         landmarks = faces[0].landmark
         points = {
             index: (landmarks[index].x * width, landmarks[index].y * height)
             for index in LIP_LANDMARKS
         }
+        all_points = [(landmark.x * width, landmark.y * height) for landmark in landmarks]
+        x_values, y_values = zip(*all_points, strict=True)
+        face_bbox_size_px = math.hypot(max(x_values) - min(x_values), max(y_values) - min(y_values))
+        raw_vild_px = math.dist(points[INNER_UPPER_LIP], points[INNER_LOWER_LIP])
         vild = normalized_vild(
             points[INNER_UPPER_LIP],
             points[INNER_LOWER_LIP],
             points[LEFT_MOUTH_CORNER],
             points[RIGHT_MOUTH_CORNER],
         )
-        return 1, vild, points
+        return 1, vild, points, raw_vild_px, face_bbox_size_px
 
     def trace_video(self, video_path: Path, fps: float) -> dict[str, object]:
         """Measure normalized VILD once per decoded frame for later feature work."""
@@ -189,7 +193,9 @@ class MouthEventAnalyzer:
                     fallback_timestamp_frames += 1
                 last_timestamp = timestamp_s
 
-                face_count, vild, _ = self._measure_frame(frame, trace_mesh)
+                face_count, vild, _, raw_vild_px, face_bbox_size_px = self._measure_frame(
+                    frame, trace_mesh
+                )
                 if face_count > 1:
                     multiple_face_frames += 1
                 if vild is not None:
@@ -200,6 +206,12 @@ class MouthEventAnalyzer:
                         "timestamp_s": round(timestamp_s, 9),
                         "face_count": face_count,
                         "normalized_vild": round(vild, 9) if vild is not None else None,
+                        "raw_vild_px": round(raw_vild_px, 9) if raw_vild_px is not None else None,
+                        "face_bbox_size_px": (
+                            round(face_bbox_size_px, 9)
+                            if face_bbox_size_px is not None
+                            else None
+                        ),
                     }
                 )
                 frame_index += 1
@@ -289,7 +301,7 @@ class MouthEventAnalyzer:
                 attempted_frames += 1
                 timestamp_s = frame_index / fps
                 height, width = frame.shape[:2]
-                face_count, vild, points = self._measure_frame(frame)
+                face_count, vild, points, _, _ = self._measure_frame(frame)
 
                 if overlay_path is not None and overlay_writer is None:
                     overlay_path.parent.mkdir(parents=True, exist_ok=True)

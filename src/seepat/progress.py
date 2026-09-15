@@ -6,8 +6,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from time import sleep
 
-from seepat.artifacts import stable_id
+from seepat.artifacts import file_sha256, stable_id
 from seepat.config import load_pipeline_settings
+from seepat.live_progress import format_live_progress, live_progress_path
 from seepat.pipeline import PIPELINE_VERSION, selected_manifest_rows
 
 
@@ -104,10 +105,30 @@ def _completed_history_epochs(path: Path) -> int:
     return max((int(epoch) for epoch in epochs), default=0)
 
 
+def read_live_workflow_progress(config_path: Path) -> dict[str, object]:
+    """Read one small status file without importing models or rehashing the dataset."""
+    from seepat.workflow import load_workflow_settings
+
+    settings = load_workflow_settings(config_path)
+    record = _read_run_record(live_progress_path(settings.report_path))
+    profile_hash = file_sha256(settings.model_training_config) if settings.model_training_config else None
+    if (not record or record.get("config_sha256") != file_sha256(config_path)
+            or record.get("model_training_config_sha256") != profile_hash):
+        return {
+            "status": "unavailable",
+            "message": (
+                "No live report for this config yet. An already-running old workflow "
+                "must be restarted once to publish audit progress."
+            ),
+        }
+    return record
+
+
 def read_workflow_progress(config_path: Path) -> dict[str, object]:
     from seepat.workflow import (
         load_workflow_settings,
         model_training_outputs_are_current,
+        numerical_calibration_outputs_are_current,
         preprocessing_outputs_are_current,
         training_outputs_are_current,
     )
@@ -165,7 +186,40 @@ def read_workflow_progress(config_path: Path) -> dict[str, object]:
             }
         )
 
-    total_stages = 2 * len(settings.jobs) + len(settings.model_training_jobs)
+    from seepat.preprocessing.augmentation import augmentation_outputs_are_current
+
+    evidence_stages = []
+    for job in settings.trace_augmentation_jobs:
+        current = augmentation_outputs_are_current(job)
+        record = (_read_run_record(job.output_dir / "progress.json")
+                  or _read_run_record(job.output_dir / "summary.json"))
+        current_stages += int(current)
+        evidence_stages.append({
+            "name": job.name, "status": "current" if current else (
+                "stale" if record.get("status") == "complete" else record.get("status", "pending")
+            ),
+            "videos_finished": record.get("videos_finished", 0),
+            "videos_requested": record.get("videos_requested", job.max_videos or 0),
+        })
+    for job in settings.numerical_calibration_jobs:
+        current = numerical_calibration_outputs_are_current(job)
+        record = _read_run_record(job.output_dir / "progress.json")
+        current_stages += int(current)
+        evidence_stages.append({
+            "name": job.name,
+            "status": "current" if current else (
+                "stale" if record.get("status") == "complete" else record.get("status", "pending")
+            ),
+            "videos_finished": record.get("videos_finished", 0),
+            "videos_requested": record.get("videos_requested", 0),
+            "manifest": record.get("manifest", ""),
+        })
+    from seepat.decision import decision_stage_status
+
+    decisions = [{"name": job.name, "stages": decision_stage_status(job)} for job in settings.decision_jobs]
+    current_stages += sum(status == "current" for row in decisions for status in row["stages"].values())
+    total_stages = (2 * len(settings.jobs) + len(settings.model_training_jobs)
+                    + len(evidence_stages) + 3 * len(decisions))
     return {
         "workflow_config": config_path.as_posix(),
         "stages_current": current_stages,
@@ -173,6 +227,8 @@ def read_workflow_progress(config_path: Path) -> dict[str, object]:
         "all_current": current_stages == total_stages,
         "preparation": preparation,
         "model_training": model_training,
+        "evidence_stages": evidence_stages,
+        "decisions": decisions,
     }
 
 
@@ -193,10 +249,16 @@ def format_workflow_progress(progress: dict[str, object]) -> str:
             values.append(f"{model.get('name')}={status}{epochs}")
         if values:
             model_text = " | " + ", ".join(values)
+    evidence_text = "".join(
+        f" | {stage['name']}={stage['status']} "
+        f"{stage.get('manifest', '')} "
+        f"{stage['videos_finished']}/{stage['videos_requested']} videos"
+        for stage in progress.get("evidence_stages", [])
+    )
     return (
         f"[{timestamp}] workflow stages="
         f"{progress['stages_current']}/{progress['stages_total']} current"
-        f"{model_text}"
+        f"{model_text}{evidence_text}"
     )
 
 
@@ -207,9 +269,13 @@ def main() -> None:
     source.add_argument("--workflow-config", type=Path)
     parser.add_argument("--limit", type=int)
     parser.add_argument(
+        "--verify", action="store_true",
+        help="Recheck artifact hashes instead of reading the lightweight live workflow report",
+    )
+    parser.add_argument(
         "--watch-seconds",
         type=float,
-        help="Refresh until every requested video or workflow stage is current",
+        help="Refresh until the workflow reports completion, or all requested videos finish",
     )
     args = parser.parse_args()
     if args.watch_seconds is not None and args.watch_seconds <= 0:
@@ -219,9 +285,14 @@ def main() -> None:
         if args.workflow_config is not None:
             if args.limit is not None:
                 parser.error("--limit can only be used with --config")
-            progress = read_workflow_progress(args.workflow_config)
-            finished = bool(progress["all_current"])
-            formatted = format_workflow_progress(progress)
+            if args.watch_seconds is not None and not args.verify:
+                progress = read_live_workflow_progress(args.workflow_config)
+                finished = progress.get("status") in {"complete", "failed", "interrupted"}
+                formatted = format_live_progress(progress)
+            else:
+                progress = read_workflow_progress(args.workflow_config)
+                finished = bool(progress["all_current"])
+                formatted = format_workflow_progress(progress)
         else:
             progress = read_progress(args.config, limit=args.limit)
             finished = progress["videos_pending"] == 0

@@ -8,8 +8,10 @@ import pytest
 from seepat.artifacts import atomic_write_csv, atomic_write_json, file_sha256, stable_id
 from seepat.config import load_pipeline_settings
 from seepat.pipeline import PIPELINE_VERSION
+from seepat.preprocessing.augmentation import TraceAugmentationJob
 from seepat.workflow import (
     ModelTrainingJob,
+    NumericalCalibrationJob,
     WorkflowJob,
     WorkflowSettings,
     _sha256,
@@ -116,6 +118,47 @@ model_training:
         "efficientnet_v2_s_tempcnn",
     ]
     assert settings.model_training_jobs[1].pretrained is False
+
+
+def test_load_workflow_settings_accepts_numerical_calibration_job(tmp_path: Path) -> None:
+    path = tmp_path / "workflow.yaml"
+    path.write_text(
+        """
+jobs:
+  - name: preparation
+    pipeline_config: pipeline.yaml
+    manifest_output_dir: manifests
+numerical_calibration:
+  name: vild
+  train_manifest: train.csv
+  score_manifests:
+    train: train.csv
+    val: val.csv
+  output_dir: calibration
+  min_video_reference_frames: 4
+  isolation_trees: 10
+  random_seed: 9
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    settings = load_workflow_settings(path)
+
+    assert settings.numerical_calibration_jobs == (
+        NumericalCalibrationJob(
+            name="vild",
+            train_manifest=Path("train.csv"),
+            score_manifests=(
+                ("train", Path("train.csv")),
+                ("val", Path("val.csv")),
+            ),
+            output_dir=Path("calibration"),
+            min_video_reference_frames=4,
+            isolation_trees=10,
+            random_seed=9,
+        ),
+    )
 
 
 def test_preprocessing_current_check_detects_manifest_change(tmp_path: Path) -> None:
@@ -271,7 +314,10 @@ def test_workflow_job_runs_only_missing_stages(tmp_path: Path, monkeypatch) -> N
     assert report["preprocessing"]["action"] == "ran"
     assert report["preprocessing_contract"]["status"] == "passed"
     assert report["training_manifest"]["action"] == "built"
-    assert output_dir == load_pipeline_settings(config_path, PIPELINE_VERSION).preprocessing.output_dir
+    assert (
+        output_dir
+        == load_pipeline_settings(config_path, PIPELINE_VERSION).preprocessing.output_dir
+    )
 
 
 def test_workflow_job_skips_current_stages(tmp_path: Path, monkeypatch) -> None:
@@ -388,7 +434,7 @@ def test_model_training_job_runs_or_skips_as_needed(tmp_path: Path, monkeypatch)
     )
     monkeypatch.setattr(
         "seepat.workflow._run_model_training",
-        lambda current_job, resume_from: {"status": "complete"},
+        lambda current_job, resume_from, **kwargs: {"status": "complete"},
     )
 
     report = run_model_training_job(job)
@@ -440,7 +486,7 @@ def test_model_training_job_resumes_when_epoch_target_increases(
     )
     received_resume_path = None
 
-    def fake_training(current_job, resume_from):
+    def fake_training(current_job, resume_from, **kwargs):
         nonlocal received_resume_path
         received_resume_path = resume_from
         return {"status": "complete"}
@@ -474,13 +520,14 @@ def test_workflow_runs_model_training_after_preparation(tmp_path: Path, monkeypa
     monkeypatch.setattr("seepat.workflow.load_workflow_settings", lambda path: settings)
     monkeypatch.setattr(
         "seepat.workflow.run_workflow_job",
-        lambda job, retry_failed=False: calls.append("preparation") or {"name": job.name},
+        lambda job, **kwargs: calls.append("preparation") or {"name": job.name},
     )
     monkeypatch.setattr(
         "seepat.workflow.run_model_training_job",
-        lambda job: calls.append(f"model:{job.name}") or {"name": job.name},
+        lambda job, **kwargs: calls.append(f"model:{job.name}") or {"name": job.name},
     )
 
+    (tmp_path / "workflow.yaml").write_text("test config", encoding="utf-8")
     report = run_workflow(tmp_path / "workflow.yaml")
 
     assert calls == [
@@ -492,3 +539,37 @@ def test_workflow_runs_model_training_after_preparation(tmp_path: Path, monkeypa
         {"name": "local-preflight"},
         {"name": "local-cnn-preflight"},
     ]
+
+
+def test_scaled_configs_keep_the_completed_guarded_cache_contract():
+    assert PIPELINE_VERSION == "pilot-v4"
+    expected = {
+        "train_scaled": ("outputs/train-subset5000", "a1e06db8beb9f89a4b58639fc2d511237ec44e8419515a742439f005af56fb3e"),
+        "val_scaled": ("outputs/val-subset1000", "eea9cb4739433d331e238306d2f64913dae58fcb014e7ab31deeb74a707642a7"),
+    }
+    for name, (output, signature) in expected.items():
+        settings = load_pipeline_settings(Path("configs") / f"{name}.yaml", PIPELINE_VERSION)
+        assert settings.preprocessing.output_dir == Path(output)
+        assert settings.cache_signature == signature
+
+
+def test_workflow_orders_augmentation_before_calibration_and_preserves_model_jobs(tmp_path, monkeypatch):
+    augmentation = TraceAugmentationJob("augment", tmp_path / "events.csv", tmp_path, tmp_path / "aug")
+    calibration = NumericalCalibrationJob("calibrate", tmp_path / "train.csv",
+                                          (("val", tmp_path / "val.csv"),), tmp_path / "cal")
+    model = ModelTrainingJob("swin", tmp_path / "train.csv", tmp_path / "val.csv",
+                             tmp_path / "model", tmp_path, "cpu", False, {})
+    settings = WorkflowSettings((), (model,), tmp_path / "report.json", (calibration,), (augmentation,))
+    calls = []
+    monkeypatch.setattr("seepat.workflow.load_workflow_settings", lambda p: settings)
+    for function in ("run_trace_augmentation", "run_numerical_calibration_job", "run_model_training_job"):
+        monkeypatch.setattr("seepat.workflow." + function, lambda job, **kwargs: calls.append(job.name))
+    (tmp_path / "workflow.yaml").write_text("test config", encoding="utf-8")
+    run_workflow(tmp_path / "workflow.yaml")
+    assert calls == ["augment", "calibrate", "swin"]
+
+
+def test_calibration_pilot_has_no_preprocessing_or_model_jobs():
+    settings = load_workflow_settings(Path("configs/workflow_calibration_pilot.yaml"))
+    assert not settings.jobs and not settings.model_training_jobs
+    assert [job.max_videos for job in settings.trace_augmentation_jobs] == [10, 10]

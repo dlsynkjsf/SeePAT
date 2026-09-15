@@ -14,10 +14,12 @@ from typing import Any
 import torch
 from torch import nn
 from torch.nn import functional as F
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 
 from seepat.artifacts import atomic_write_json
+from seepat.live_progress import ProgressCallback
 from seepat.models.cnn_temporal import EfficientNetTempCNNEventClassifier
+from seepat.models.fusion import FUSION_MODEL_NAME, HybridFusionEventClassifier
 from seepat.models.swin_baseline import SwinBaseEventClassifier, parameter_counts
 from seepat.training.dataset import MouthEventDataset
 from seepat.training.metrics import (
@@ -27,14 +29,17 @@ from seepat.training.metrics import (
 
 SWIN_BASE_MODEL = "swin3d_b"
 CNN_TEMPORAL_MODEL = "efficientnet_v2_s_tempcnn"
-SUPPORTED_MODELS = (SWIN_BASE_MODEL, CNN_TEMPORAL_MODEL)
+FUSION_MODEL = FUSION_MODEL_NAME
+SUPPORTED_MODELS = (SWIN_BASE_MODEL, CNN_TEMPORAL_MODEL, FUSION_MODEL)
 MODEL_CONTRACT_NAMES = {
     SWIN_BASE_MODEL: "torchvision.swin3d_b",
     CNN_TEMPORAL_MODEL: "torchvision.efficientnet_v2_s+tempcnn",
+    FUSION_MODEL: "seepat.hybrid_fusion.swin3d_b_tempcnn_evidence",
 }
 MODEL_TRAINING_VERSIONS = {
     SWIN_BASE_MODEL: "swin-baseline-v1",
     CNN_TEMPORAL_MODEL: "cnn-temporal-v1",
+    FUSION_MODEL: "hybrid-fusion-v3",
 }
 # Backward-compatible public name for existing Swin run records and callers.
 TRAINING_VERSION = MODEL_TRAINING_VERSIONS[SWIN_BASE_MODEL]
@@ -66,6 +71,11 @@ def build_event_classifier(
         )
     if model_name == CNN_TEMPORAL_MODEL:
         return EfficientNetTempCNNEventClassifier(
+            pretrained=pretrained,
+            freeze_backbone=freeze_backbone,
+        )
+    if model_name == FUSION_MODEL:
+        return HybridFusionEventClassifier(
             pretrained=pretrained,
             freeze_backbone=freeze_backbone,
         )
@@ -109,8 +119,8 @@ class TrainingOptions:
             raise ValueError("learning_rate must be positive")
         if self.weight_decay < 0:
             raise ValueError("weight_decay must not be negative")
-        if self.class_weighting not in {"balanced", "none"}:
-            raise ValueError("class_weighting must be 'balanced' or 'none'")
+        if self.class_weighting not in {"balanced", "balanced_global", "none"}:
+            raise ValueError("class_weighting must be 'balanced', 'balanced_global', or 'none'")
         batch_limits = (self.max_train_batches, self.max_validation_batches)
         if (batch_limits[0] is None) != (batch_limits[1] is None):
             raise ValueError(
@@ -160,7 +170,23 @@ def _loader(
     device: torch.device,
     shuffle: bool,
     seed: int,
+    balanced_limit: int | None = None,
 ) -> DataLoader[Any]:
+    if balanced_limit is not None:
+        pools = [[index for index, row in enumerate(dataset.rows) if int(row["class_id"]) == label]
+                 for label in (0, 1)]
+        if balanced_limit < 2 or not all(pools):
+            raise ValueError("Balanced readiness sampling requires both classes and at least two events")
+        randomizer = random.Random(seed)
+        for pool in pools:
+            randomizer.shuffle(pool)
+        indices = []
+        for index in range(min(balanced_limit, len(dataset))):
+            label = index % 2
+            if not pools[label]:
+                label = 1 - label
+            indices.append(pools[label].pop())
+        dataset = Subset(dataset, indices)
     generator = torch.Generator()
     generator.manual_seed(seed)
     return DataLoader(
@@ -180,15 +206,35 @@ def _forward_logits(
     batch: dict[str, Any],
     device: torch.device,
 ) -> torch.Tensor:
-    if not bool(getattr(model, "uses_frame_mask", False)):
+    kwargs: dict[str, torch.Tensor] = {}
+    if bool(getattr(model, "uses_frame_mask", False)):
+        frame_mask = batch.get("frame_mask")
+        if not isinstance(frame_mask, torch.Tensor):
+            raise TypeError("A mask-aware model requires a tensor frame_mask in every batch")
+        kwargs["frame_mask"] = frame_mask.to(
+            device=device,
+            dtype=torch.bool,
+            non_blocking=True,
+        )
+    if bool(getattr(model, "uses_evidence_features", False)):
+        evidence = batch.get("evidence_features")
+        evidence_mask = batch.get("evidence_feature_mask")
+        if not isinstance(evidence, torch.Tensor) or not isinstance(
+            evidence_mask, torch.Tensor
+        ):
+            raise TypeError(
+                "An evidence-aware model requires evidence_features and "
+                "evidence_feature_mask tensors in every batch"
+            )
+        kwargs["features"] = evidence.to(device=device, non_blocking=True)
+        kwargs["feature_mask"] = evidence_mask.to(
+            device=device,
+            dtype=torch.bool,
+            non_blocking=True,
+        )
+    if not kwargs:
         return model(videos)
-    frame_mask = batch.get("frame_mask")
-    if not isinstance(frame_mask, torch.Tensor):
-        raise TypeError("A mask-aware model requires a tensor frame_mask in every batch")
-    return model(
-        videos,
-        frame_mask.to(device=device, dtype=torch.bool, non_blocking=True),
-    )
+    return model(videos, **kwargs)
 
 
 def _evaluate(
@@ -198,6 +244,8 @@ def _evaluate(
     device: torch.device,
     amp_enabled: bool,
     max_batches: int | None = None,
+    progress: ProgressCallback | None = None,
+    phase: str = "validate model",
 ) -> dict[str, object]:
     model.eval()
     loss_sum = 0.0
@@ -209,7 +257,9 @@ def _evaluate(
     batch_count = min(len(loader), max_batches) if max_batches is not None else len(loader)
 
     with torch.inference_mode():
-        for batch in islice(loader, batch_count):
+        for index, batch in enumerate(islice(loader, batch_count)):
+            if progress is not None:
+                progress(phase, index, batch_count, str(batch["video_id"][0]))
             videos = batch["video"].to(device, non_blocking=True)
             labels = batch["label"].to(device, non_blocking=True)
             with torch.autocast(
@@ -218,7 +268,9 @@ def _evaluate(
                 enabled=amp_enabled,
             ):
                 logits = _forward_logits(model, videos, batch, device)
-                loss = loss_function(logits, labels)
+                loss = loss_function(logits, labels).mean()
+            if not torch.isfinite(loss).item():
+                raise FloatingPointError("Validation loss is not finite")
             batch_size = labels.shape[0]
             loss_sum += float(loss.item()) * batch_size
             event_count += batch_size
@@ -227,6 +279,8 @@ def _evaluate(
             video_ids.extend(batch["video_id"])
             video_labels.extend(batch["video_label"].tolist())
 
+    if progress is not None:
+        progress(phase, batch_count, batch_count, "")
     _, aggregated_labels, aggregated_probabilities = aggregate_video_probabilities(
         video_ids,
         video_labels,
@@ -310,6 +364,7 @@ def train_model(
     device: torch.device,
     resume_contract: dict[str, object],
     resume_from: Path | None = None,
+    progress: ProgressCallback | None = None,
 ) -> dict[str, object]:
     options.validate()
     train_rows = getattr(train_dataset, "rows", None)
@@ -328,6 +383,7 @@ def train_model(
             "learning_rate": options.learning_rate,
             "weight_decay": options.weight_decay,
             "gradient_accumulation_steps": options.gradient_accumulation_steps,
+            "step_counting": "completed_optimizer_updates",
         },
         "selection": {
             "metric": "validation_video_f1",
@@ -355,10 +411,15 @@ def train_model(
         torch.cuda.reset_peak_memory_stats(device)
     class_weights = (
         _balanced_class_weights(train_rows, device)
-        if options.class_weighting == "balanced"
+        if options.class_weighting in {"balanced", "balanced_global"}
         else None
     )
-    loss_function = nn.CrossEntropyLoss(weight=class_weights)
+    # Global Train weights must survive batch size one and gradient accumulation.
+    # Retain the old batch-normalized mode for historical checkpoint replay.
+    loss_function = nn.CrossEntropyLoss(
+        weight=class_weights,
+        reduction="none" if options.class_weighting == "balanced_global" else "mean",
+    )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     history: list[dict[str, object]] = []
@@ -368,6 +429,8 @@ def train_model(
     best_epoch = 0
     epochs_without_improvement = 0
     if resume_from is not None:
+        if progress is not None:
+            progress("restore model checkpoint", 0, 0, resume_from.as_posix())
         checkpoint = torch.load(resume_from, map_location="cpu", weights_only=False)
         if checkpoint.get("checkpoint_type") != "seepat_resumable_training":
             raise ValueError("The resume file is not a SeePAT training checkpoint")
@@ -389,6 +452,13 @@ def train_model(
             f"requested total epochs is {options.epochs}"
         )
 
+    def count_optimizer_step(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal global_step
+        global_step += 1
+
+    # GradScaler can skip optimizer.step() when gradients overflow.
+    optimizer.register_step_post_hook(count_optimizer_step)
+
     started_at = datetime.now(UTC).isoformat()
     started = perf_counter()
     last_completed_epoch = start_epoch - 1
@@ -407,6 +477,16 @@ def train_model(
         )
     processed_train_events = 0
     processed_validation_events = 0
+    evidence_audit: dict[str, object] | None = None
+    if bool(getattr(model, "uses_evidence_features", False)):
+        train_coverage = getattr(train_dataset, "evidence_coverage", None)
+        validation_coverage = getattr(validation_dataset, "evidence_coverage", None)
+        if callable(train_coverage) and callable(validation_coverage):
+            evidence_audit = {
+                "fields": list(getattr(model, "evidence_fields", ())),
+                "train": train_coverage(),
+                "validation": validation_coverage(),
+            }
     run_record: dict[str, object] = {
         "status": "running",
         "run_type": "engineering_preflight" if limited_run else "training_experiment",
@@ -418,7 +498,13 @@ def train_model(
         "resume_contract": resume_contract,
         "options": asdict(options),
         "parameters": parameter_counts(model),
+        "optimizer_steps": 0,
+        "skipped_optimizer_steps": 0,
         "data": {
+            "preflight_sampling": (
+                "balanced_events" if limited_run and options.class_weighting == "balanced_global"
+                else "original_loader_order"
+            ),
             "train_events": len(train_dataset),
             "validation_events": len(validation_dataset),
             "train_source_groups": len({row["source_group"] for row in train_rows}),
@@ -427,6 +513,7 @@ def train_model(
             ),
             "train_batches_per_epoch": train_batches_per_epoch,
             "validation_batches_per_epoch": validation_batches_per_epoch,
+            "evidence_coverage": evidence_audit,
         },
         "class_weights": class_weights.cpu().tolist() if class_weights is not None else None,
         "environment": {
@@ -451,6 +538,8 @@ def train_model(
             device,
             shuffle=False,
             seed=options.seed,
+            balanced_limit=(validation_batches_per_epoch * options.batch_size
+                            if limited_run and options.class_weighting == "balanced_global" else None),
         )
         for epoch in range(start_epoch, options.epochs + 1):
             train_loader = _loader(
@@ -460,6 +549,8 @@ def train_model(
                 device,
                 shuffle=True,
                 seed=options.seed + epoch,
+                balanced_limit=(train_batches_per_epoch * options.batch_size
+                                if limited_run and options.class_weighting == "balanced_global" else None),
             )
             model.train()
             if options.freeze_backbone and hasattr(model, "backbone"):
@@ -467,6 +558,8 @@ def train_model(
             optimizer.zero_grad(set_to_none=True)
             loss_sum = 0.0
             event_count = 0
+            epoch_start_step = global_step
+            epoch_skipped_steps = 0
             train_labels: list[int] = []
             train_probabilities: list[float] = []
 
@@ -474,6 +567,16 @@ def train_model(
                 islice(train_loader, train_batches_per_epoch),
                 start=1,
             ):
+                if progress is not None:
+                    progress(f"train epoch {epoch}/{options.epochs}", batch_index - 1,
+                             train_batches_per_epoch, str(batch["video_id"][0]))
+                if evidence_audit is not None and "first_train_batch" not in run_record["data"]:
+                    run_record["data"]["first_train_batch"] = {
+                        "video_shape": list(batch["video"].shape),
+                        "frame_mask_shape": list(batch["frame_mask"].shape),
+                        "evidence_shape": list(batch["evidence_features"].shape),
+                        "evidence_mask": batch["evidence_feature_mask"].tolist(),
+                    }
                 videos = batch["video"].to(device, non_blocking=True)
                 labels = batch["label"].to(device, non_blocking=True)
                 with torch.autocast(
@@ -482,18 +585,35 @@ def train_model(
                     enabled=amp_enabled,
                 ):
                     logits = _forward_logits(model, videos, batch, device)
-                    batch_loss = loss_function(logits, labels)
-                    backward_loss = batch_loss / options.gradient_accumulation_steps
+                    batch_loss = loss_function(logits, labels).mean()
+                    accumulation_size = options.gradient_accumulation_steps
+                    backward_loss = batch_loss / accumulation_size
+                    if options.class_weighting == "balanced_global":
+                        group_start = ((batch_index - 1) // accumulation_size) * accumulation_size
+                        group_end = min(group_start + accumulation_size, train_batches_per_epoch)
+                        group_samples = min(len(train_dataset), group_end * options.batch_size) - group_start * options.batch_size
+                        backward_loss = batch_loss * labels.numel() / group_samples
+                if not torch.isfinite(batch_loss).item():
+                    raise FloatingPointError("Training loss is not finite")
                 scaler.scale(backward_loss).backward()
                 final_batch = batch_index == train_batches_per_epoch
                 if (
                     batch_index % options.gradient_accumulation_steps == 0
                     or final_batch
                 ):
+                    step_before = global_step
+                    if not scaler.is_enabled():
+                        # Validate full-precision gradients without clipping their norm.
+                        nn.utils.clip_grad_norm_(
+                            trainable_parameters, float("inf"), error_if_nonfinite=True,
+                        )
                     scaler.step(optimizer)
                     scaler.update()
                     optimizer.zero_grad(set_to_none=True)
-                    global_step += 1
+                    updated = global_step > step_before
+                    run_record["optimizer_steps"] += int(updated)
+                    run_record["skipped_optimizer_steps"] += int(not updated)
+                    epoch_skipped_steps += int(not updated)
 
                 batch_size = labels.shape[0]
                 loss_sum += float(batch_loss.item()) * batch_size
@@ -503,6 +623,22 @@ def train_model(
                     F.softmax(logits.detach().float(), dim=1)[:, 1].cpu().tolist()
                 )
             processed_train_events += event_count
+            if progress is not None:
+                progress(f"train epoch {epoch}/{options.epochs}", train_batches_per_epoch,
+                         train_batches_per_epoch, "")
+
+            epoch_optimizer_steps = global_step - epoch_start_step
+            print(
+                f"Epoch {epoch}/{options.epochs}: {epoch_optimizer_steps} optimizer updates, "
+                f"{epoch_skipped_steps} skipped"
+            )
+            if epoch_optimizer_steps == 0:
+                raise RuntimeError(
+                    "No optimizer updates completed this epoch; AMP may have skipped "
+                    "all steps after gradient overflow. This run is not a successful "
+                    "training check. For the bounded preflight, use amp: false in a "
+                    "new output directory."
+                )
 
             validation = _evaluate(
                 model,
@@ -511,11 +647,15 @@ def train_model(
                 device,
                 amp_enabled,
                 max_batches=options.max_validation_batches,
+                progress=progress,
+                phase=f"validate epoch {epoch}/{options.epochs}",
             )
             processed_validation_events += int(validation["events_processed"])
             epoch_record: dict[str, object] = {
                 "epoch": epoch,
                 "global_step": global_step,
+                "optimizer_steps": epoch_optimizer_steps,
+                "skipped_optimizer_steps": epoch_skipped_steps,
                 "learning_rate": optimizer.param_groups[0]["lr"],
                 "train": {
                     "loss": loss_sum / event_count,
@@ -558,6 +698,8 @@ def train_model(
                 options=options,
                 resume_contract=resume_contract,
             )
+            if progress is not None:
+                progress(f"save checkpoint epoch {epoch}/{options.epochs}", 0, 0, "")
             _atomic_torch_save(output_dir / "checkpoint_last.pt", checkpoint)
             if improved:
                 _atomic_torch_save(
@@ -587,6 +729,7 @@ def train_model(
                 "completed_at_utc": datetime.now(UTC).isoformat(),
                 "error_type": type(error).__name__,
                 "error": str(error),
+                "global_step": global_step,
             }
         )
         atomic_write_json(output_dir / "run.json", run_record)
@@ -648,6 +791,7 @@ def train_from_manifests(
     pretrained: bool,
     model_name: str = SWIN_BASE_MODEL,
     resume_from: Path | None = None,
+    progress: ProgressCallback | None = None,
 ) -> dict[str, object]:
     device = _device(device_name)
     torch.hub.set_dir(str(project_root / ".cache" / "torch"))
@@ -657,6 +801,7 @@ def train_from_manifests(
         dataset_split="train",
         sequence_length=options.sequence_length,
         image_size=options.image_size,
+        require_calibration=model_name == FUSION_MODEL,
     )
     validation_dataset = MouthEventDataset(
         manifest_path=validation_manifest,
@@ -664,6 +809,19 @@ def train_from_manifests(
         dataset_split="val",
         sequence_length=options.sequence_length,
         image_size=options.image_size,
+        require_calibration=model_name == FUSION_MODEL,
+    )
+    if train_dataset.calibration_contract != validation_dataset.calibration_contract:
+        raise ValueError("Fusion Train and Validation must share the same frozen calibration")
+    if source_group_overlap(train_dataset.rows, validation_dataset.rows):
+        raise ValueError("Source-group leakage between train and validation")
+    if progress is not None:
+        progress("initialize model", 0, 0, model_name)
+    _seed_everything(options.seed)
+    model = build_event_classifier(
+        model_name=model_name,
+        pretrained=pretrained and resume_from is None,
+        freeze_backbone=options.freeze_backbone,
     )
     resume_contract = {
         "training_version": training_version_for_model(model_name),
@@ -674,14 +832,12 @@ def train_from_manifests(
         "sequence_length": options.sequence_length,
         "image_size": options.image_size,
         "class_weighting": options.class_weighting,
+        "evidence_fields": list(getattr(model, "evidence_fields", ())),
         "train_manifest_sha256": _sha256(train_manifest),
         "validation_manifest_sha256": _sha256(validation_manifest),
     }
-    model = build_event_classifier(
-        model_name=model_name,
-        pretrained=pretrained and resume_from is None,
-        freeze_backbone=options.freeze_backbone,
-    )
+    if model_name == FUSION_MODEL:
+        resume_contract["fusion_inputs"] = train_dataset.calibration_contract
     return train_model(
         model=model,
         train_dataset=train_dataset,
@@ -691,6 +847,7 @@ def train_from_manifests(
         device=device,
         resume_contract=resume_contract,
         resume_from=resume_from,
+        progress=progress,
     )
 
 
@@ -736,7 +893,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--class-weighting",
-        choices=("balanced", "none"),
+        choices=("balanced", "balanced_global", "none"),
         default="balanced",
     )
     args = parser.parse_args()

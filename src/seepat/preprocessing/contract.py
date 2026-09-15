@@ -6,6 +6,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 from seepat.artifacts import file_sha256, read_csv_rows
+from seepat.live_progress import ProgressCallback
 from seepat.preprocessing.vild import load_vild_trace
 
 HASHED_VIDEO_ARTIFACTS = (
@@ -58,6 +59,7 @@ def _verify_file(
 def audit_preprocessing_contract(
     output_dir: Path,
     project_root: Path = Path("."),
+    progress: ProgressCallback | None = None,
 ) -> dict[str, object]:
     summary_path = output_dir / "run_summary.json"
     video_path = output_dir / "video_manifest.csv"
@@ -93,7 +95,9 @@ def audit_preprocessing_contract(
     reference_strategies: Counter[str] = Counter()
     reference_windows = 0
     eligible_events = 0
-    for video_id, trace_row in traces.items():
+    for index, (video_id, trace_row) in enumerate(traces.items()):
+        if progress is not None:
+            progress("audit preprocessing contract", index, len(traces), video_id)
         video = videos[video_id]
         for path_field, hash_field in HASHED_VIDEO_ARTIFACTS:
             _verify_file(video, path_field, hash_field, project_root)
@@ -180,6 +184,8 @@ def audit_preprocessing_contract(
     if int(summary.get("bilabial_events", -1)) != len(events):
         raise ValueError("Run summary has the wrong bilabial-event count")
 
+    if progress is not None:
+        progress("audit preprocessing contract", len(traces), len(traces), "")
     return {
         "status": "passed",
         "output_dir": str(output_dir),

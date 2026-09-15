@@ -128,6 +128,7 @@ def _training_row(
         "video_id": event["video_id"].strip(),
         "file": _portable_path(file_name),
         "dataset_split": dataset_split,
+        **({"dataset_source": source["dataset_source"]} if source.get("dataset_source") else {}),
         "source_group": source_group,
         "subject_id": source.get("subject_id", "").strip(),
         "manipulation_modality": event.get("manipulation_modality", "").strip(),

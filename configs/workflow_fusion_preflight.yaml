@@ -1,0 +1,29 @@
+# Setup/preflight only: one bounded epoch to test the fusion job in isolation.
+# Then workflow_scaled.yaml resumes epoch 2 and skips all current earlier stages.
+report: outputs/workflow_fusion_preflight_summary.json
+jobs: []
+model_training:
+  name: local-fusion-preflight
+  model: swin3d_b_vild_fusion
+  train_manifest: outputs/numerical_calibration/guarded_per_video_v3/events_train_calibrated.csv
+  validation_manifest: outputs/numerical_calibration/guarded_per_video_v3/events_val_calibrated.csv
+  output_dir: outputs/training/local_fusion_preflight_guarded_v3
+  project_root: .
+  device: cuda
+  pretrained: false
+  options:
+    epochs: 1
+    batch_size: 1
+    workers: 0
+    learning_rate: 0.0001
+    weight_decay: 0.01
+    gradient_accumulation_steps: 2
+    sequence_length: 16
+    image_size: 224
+    seed: 20260915
+    amp: false  # A one-update preflight must not be consumed by AMP scale warmup.
+    freeze_backbone: true
+    class_weighting: balanced
+    early_stopping_patience: 3
+    max_train_batches: 2
+    max_validation_batches: 1
