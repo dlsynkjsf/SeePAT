@@ -108,7 +108,19 @@ def test_same_subject_videos_fit_independently_and_trace_loaded_once_per_pass(
 
     monkeypatch.setattr(cal.IsolationForest, "fit", fit)
     monkeypatch.setattr(cal, "augmented_trace_for_row", load)
-    cal.fit_and_score_calibration(train, {"train": train}, tmp_path / "out", OPTIONS)
+    updates = []
+    cal.fit_and_score_calibration(
+        train, {"train": train}, tmp_path / "out", OPTIONS,
+        progress=lambda *args: updates.append(args),
+    )
+    assert updates == [
+        ("fit Train population", 0, 2, "a"),
+        ("fit Train population", 1, 2, "b"),
+        ("fit Train population", 2, 2, ""),
+        ("calibrate train videos", 0, 2, "a"),
+        ("calibrate train videos", 1, 2, "b"),
+        ("calibrate train videos", 2, 2, ""),
+    ]
     assert len(fit_inputs) == 2
     assert all(values.shape == (20, 1) for values in fit_inputs)
     assert not np.array_equal(*fit_inputs)

@@ -13,7 +13,7 @@ from seepat.evidence import (
 
 
 def test_evidence_version_and_labels_cover_every_field() -> None:
-    assert EVIDENCE_VERSION == "fusion-evidence-v1"
+    assert EVIDENCE_VERSION == "fusion-evidence-v2"
     assert set(EVIDENCE_LABELS) == set(FUSION_EVIDENCE_FIELDS)
     assert len(FUSION_EVIDENCE_FIELDS) == len(set(FUSION_EVIDENCE_FIELDS))
 

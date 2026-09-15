@@ -114,7 +114,7 @@ def _write_checkpoint(path: Path) -> None:
             "completed_epoch": 1,
             "model_state": model.state_dict(),
             "resume_contract": {
-                "training_version": "hybrid-fusion-v1",
+                "training_version": "hybrid-fusion-v3",
                 "model": "seepat.hybrid_fusion.swin3d_b_tempcnn_evidence",
                 "model_name": "swin3d_b_vild_fusion",
             },
@@ -224,7 +224,7 @@ def test_run_verdict_aggregates_maximum_event_probability(
     assert summary["event_count"] == 3
     assert summary["video_count"] == 3
     assert summary["not_evaluated_videos"] == 1
-    assert summary["sync_gap_scores"] is True
+    assert summary["sync_gap_scores"] is False
     assert summary["metrics"] is not None
     assert summary["metrics"]["video_aggregation"] == "maximum event probability"
 
@@ -242,7 +242,7 @@ def test_run_verdict_aggregates_maximum_event_probability(
     events = read_csv_rows(tmp_path / "out" / "event_predictions.csv")
     assert len(events) == 3
     for event in events:
-        assert event["sync_gap_score"] != ""
+        assert event["sync_gap_score"] == ""
         for field in FUSION_EVIDENCE_FIELDS:
             assert field in event
     evaluation = json.loads((tmp_path / "out" / "evaluation.json").read_text())

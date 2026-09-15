@@ -47,20 +47,19 @@ def _tiny_model(freeze_backbone: bool = False) -> HybridFusionEventClassifier:
     )
 
 
-def test_fusion_returns_logits_and_sync_gap_scores() -> None:
+def test_fusion_returns_logits_without_unsupervised_sync_gap_head() -> None:
     model = _tiny_model().eval()
     video = torch.rand(2, 3, 4, 8, 8)
     frame_mask = torch.tensor([[True, True, True, True], [True, True, False, False]])
     features = torch.rand(2, EVIDENCE_WIDTH)
     feature_mask = torch.tensor([[True] * EVIDENCE_WIDTH, [False] * EVIDENCE_WIDTH])
 
-    logits, sync_gap = model.forward_with_sync_gap(video, frame_mask, features, feature_mask)
-    plain_logits = model(video, frame_mask, features, feature_mask)
+    logits = model(video, frame_mask, features, feature_mask)
 
     assert logits.shape == (2, 2)
-    assert sync_gap.shape == (2,)
-    assert torch.allclose(logits, plain_logits)
-    assert torch.all(sync_gap > 0) and torch.all(sync_gap < 1)
+    assert torch.isfinite(logits).all()
+    assert not hasattr(model, "sync_gap_head")
+    assert not hasattr(model, "forward_with_sync_gap")
 
 
 def test_fusion_ignores_masked_evidence_values() -> None:
@@ -70,15 +69,15 @@ def test_fusion_ignores_masked_evidence_values() -> None:
     features = torch.rand(1, EVIDENCE_WIDTH)
     feature_mask = torch.tensor([[True, True, False, False, False, False, False]])
     altered = features.clone()
-    altered[0, 2:] = 1000.0
+    altered[0, 2:] = float("nan")
 
-    first_logits, first_sync = model.forward_with_sync_gap(
+    first_logits = model(
         video,
         None,
         features,
         feature_mask,
     )
-    second_logits, second_sync = model.forward_with_sync_gap(
+    second_logits = model(
         video,
         None,
         altered,
@@ -86,17 +85,46 @@ def test_fusion_ignores_masked_evidence_values() -> None:
     )
 
     assert torch.allclose(first_logits, second_logits)
-    assert torch.allclose(first_sync, second_sync)
 
 
-def test_fusion_runs_without_evidence_branch_inputs() -> None:
+def test_fusion_requires_explicit_evidence_but_accepts_all_missing() -> None:
     model = _tiny_model().eval()
     video = torch.rand(1, 3, 4, 8, 8)
 
-    logits, sync_gap = model.forward_with_sync_gap(video)
+    with pytest.raises(ValueError, match="explicit evidence"):
+        model(video)
+    logits = model(
+        video,
+        features=torch.zeros(1, EVIDENCE_WIDTH),
+        feature_mask=torch.zeros(1, EVIDENCE_WIDTH, dtype=torch.bool),
+    )
+    assert logits.shape == (1, 2) and torch.isfinite(logits).all()
 
-    assert logits.shape == (1, 2)
-    assert sync_gap.shape == (1,)
+
+def test_fusion_distinguishes_which_zero_feature_is_missing() -> None:
+    torch.manual_seed(11)
+    model = _tiny_model().eval()
+    video = torch.zeros(1, 3, 4, 8, 8)
+    features = torch.zeros(1, EVIDENCE_WIDTH)
+    first_mask = torch.ones_like(features, dtype=torch.bool)
+    second_mask = first_mask.clone()
+    first_mask[0, 0] = False
+    second_mask[0, 1] = False
+    # Same values and missing fraction, different evidence availability.
+    assert not torch.allclose(
+        model(video, features=features, feature_mask=first_mask),
+        model(video, features=features, feature_mask=second_mask),
+    )
+
+
+def test_fusion_rejects_nonfinite_available_features() -> None:
+    model = _tiny_model()
+    with pytest.raises(ValueError, match="must be finite"):
+        model(
+            torch.zeros(1, 3, 4, 8, 8),
+            features=torch.full((1, EVIDENCE_WIDTH), float("inf")),
+            feature_mask=torch.ones(1, EVIDENCE_WIDTH, dtype=torch.bool),
+        )
 
 
 def test_fusion_rejects_wrong_evidence_width() -> None:
@@ -116,17 +144,11 @@ def test_frozen_fusion_backbones_leave_fusion_branch_trainable() -> None:
     assert model.backbone.training is False
     assert model.frame_backbone.training is False
     assert all(not parameter.requires_grad for parameter in model.backbone.parameters())
-    assert all(
-        not parameter.requires_grad for parameter in model.frame_backbone.parameters()
-    )
-    assert all(
-        parameter.requires_grad for parameter in model.temporal_encoder.parameters()
-    )
-    assert all(
-        parameter.requires_grad for parameter in model.evidence_branch.parameters()
-    )
+    assert all(not parameter.requires_grad for parameter in model.frame_backbone.parameters())
+    assert all(parameter.requires_grad for parameter in model.temporal_encoder.parameters())
+    assert all(parameter.requires_grad for parameter in model.evidence_branch.parameters())
     assert all(parameter.requires_grad for parameter in model.fusion.parameters())
-    assert all(parameter.requires_grad for parameter in model.sync_gap_head.parameters())
+    assert all(parameter.requires_grad for parameter in model.classifier.parameters())
     assert 0 < counts["trainable"] < counts["total"]
 
 

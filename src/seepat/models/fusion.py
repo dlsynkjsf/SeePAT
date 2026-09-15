@@ -11,11 +11,9 @@ The fusion model combines three modality branches:
    as a masked numerical branch.
 
 A cross-modal fusion block attends over the three modality tokens with a
-dedicated fusion token. Two heads consume the fused representation:
-
-* ``sync_gap_head`` emits the learned **sync-gap anomaly score** (the Figure
-  4.1 "Sync-Gap Anomaly Scores" output);
-* ``classifier`` emits the binary event logits (softmax at inference).
+dedicated fusion token. A classifier emits binary event logits (softmax at
+inference). The measured closure offset is descriptive timing evidence in
+seconds; there is no separately supervised sync-gap anomaly head.
 
 The evidence vector contract lives in :mod:`seepat.evidence`; field order and
 width are frozen per training version.
@@ -32,7 +30,8 @@ from torch import Tensor, nn
 from torchvision.models import EfficientNet_V2_S_Weights, efficientnet_v2_s
 from torchvision.models.video import Swin3D_B_Weights, swin3d_b
 
-from seepat.evidence import FUSION_EVIDENCE_FIELDS
+from seepat.artifacts import atomic_write_json
+from seepat.evidence import CLOSURE_OFFSET_DEFINITION, EVIDENCE_VERSION, FUSION_EVIDENCE_FIELDS
 from seepat.models.cnn_temporal import (
     IMAGENET_MEAN,
     IMAGENET_STD,
@@ -138,7 +137,7 @@ class HybridFusionEventClassifier(nn.Module):
         self.swin_projection = nn.Linear(swin_feature_count, fusion_dimension)
         self.temporal_projection = nn.Linear(embedding_features, fusion_dimension)
         self.evidence_branch = nn.Sequential(
-            nn.Linear(evidence_features + 1, evidence_hidden),
+            nn.Linear(2 * evidence_features, evidence_hidden),
             nn.LayerNorm(evidence_hidden),
             nn.GELU(),
             nn.Dropout(dropout),
@@ -146,8 +145,7 @@ class HybridFusionEventClassifier(nn.Module):
             nn.GELU(),
         )
         self.fusion = CrossModalFusionBlock(fusion_dimension, fusion_heads, dropout)
-        self.sync_gap_head = nn.Linear(fusion_dimension, 1)
-        self.classifier = nn.Linear(fusion_dimension + 1, 2)
+        self.classifier = nn.Linear(fusion_dimension, 2)
 
         self.register_buffer(
             "pixel_mean",
@@ -220,10 +218,11 @@ class HybridFusionEventClassifier(nn.Module):
                 "evidence features must have width "
                 f"{self.evidence_feature_count}, received {features.shape[1]}"
             )
-        mask = feature_mask.to(device=features.device, dtype=features.dtype)
-        masked = features * mask
-        missing_fraction = 1.0 - mask.mean(dim=1, keepdim=True)
-        return self.evidence_branch(torch.cat([masked, missing_fraction], dim=1))
+        mask = feature_mask.to(device=features.device, dtype=torch.bool)
+        masked = torch.where(mask, features, 0.0)
+        if not torch.isfinite(masked).all():
+            raise ValueError("Available evidence features must be finite")
+        return self.evidence_branch(torch.cat([masked, mask.to(features.dtype)], dim=1))
 
     def extract_modality_tokens(
         self,
@@ -233,42 +232,18 @@ class HybridFusionEventClassifier(nn.Module):
         feature_mask: Tensor | None = None,
     ) -> dict[str, Tensor]:
         """Return the projected Swin, CNN-temporal and evidence tokens."""
-        batch_size = video.shape[0]
-        if features is None:
-            features = torch.zeros(
-                (batch_size, self.evidence_feature_count),
-                dtype=video.dtype,
-                device=video.device,
-            )
-        if feature_mask is None:
-            feature_mask = torch.zeros_like(features, dtype=torch.bool)
-        swin_token = self.swin_projection(self._swin_features(video))
-        temporal_token = self.temporal_projection(
-            self._temporal_features(video, frame_mask)
-        )
+        if features is None or feature_mask is None:
+            raise ValueError("Fusion requires explicit evidence features and per-feature masks")
+        if features.shape[0] != video.shape[0]:
+            raise ValueError("Evidence and video batch sizes must match")
         evidence_token = self._evidence_embedding(features, feature_mask)
+        swin_token = self.swin_projection(self._swin_features(video))
+        temporal_token = self.temporal_projection(self._temporal_features(video, frame_mask))
         return {
             "swin": swin_token,
             "temporal": temporal_token,
             "evidence": evidence_token,
         }
-
-    def forward_with_sync_gap(
-        self,
-        video: Tensor,
-        frame_mask: Tensor | None = None,
-        features: Tensor | None = None,
-        feature_mask: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor]:
-        tokens = self.extract_modality_tokens(video, frame_mask, features, feature_mask)
-        stacked = torch.stack(
-            [tokens["swin"], tokens["temporal"], tokens["evidence"]],
-            dim=1,
-        )
-        fused = self.fusion(stacked)
-        sync_gap_score = torch.sigmoid(self.sync_gap_head(fused)).squeeze(1)
-        logits = self.classifier(torch.cat([fused, sync_gap_score.unsqueeze(1)], dim=1))
-        return logits, sync_gap_score
 
     def forward(
         self,
@@ -277,8 +252,13 @@ class HybridFusionEventClassifier(nn.Module):
         features: Tensor | None = None,
         feature_mask: Tensor | None = None,
     ) -> Tensor:
-        logits, _ = self.forward_with_sync_gap(video, frame_mask, features, feature_mask)
-        return logits
+        tokens = self.extract_modality_tokens(video, frame_mask, features, feature_mask)
+        stacked = torch.stack(
+            [tokens["swin"], tokens["temporal"], tokens["evidence"]],
+            dim=1,
+        )
+        fused = self.fusion(stacked)
+        return self.classifier(fused)
 
 
 def parameter_counts(model: nn.Module) -> dict[str, int]:
@@ -293,10 +273,11 @@ def parameter_counts(model: nn.Module) -> dict[str, int]:
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m seepat.models.fusion")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
-    parser.add_argument("--frames", type=int, default=8)
-    parser.add_argument("--image-size", type=int, default=112)
+    parser.add_argument("--frames", type=int, default=16)
+    parser.add_argument("--image-size", type=int, default=224)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--project-root", type=Path, default=Path("."))
+    parser.add_argument("--report", type=Path)
     args = parser.parse_args()
     if args.device == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("CUDA was requested but is not available")
@@ -307,6 +288,7 @@ def main() -> None:
     model = HybridFusionEventClassifier(pretrained=False).to(device).eval()
     event_id = None
     label = None
+    frame_mask = None
     if args.manifest is not None:
         from seepat.training.dataset import MouthEventDataset
 
@@ -315,11 +297,13 @@ def main() -> None:
             project_root=args.project_root,
             sequence_length=args.frames,
             image_size=args.image_size,
+            require_calibration=True,
         )
         event = dataset[0]
         sample = event["video"].unsqueeze(0).to(device)
         features = event["evidence_features"].unsqueeze(0).to(device)
         feature_mask = event["evidence_feature_mask"].unsqueeze(0).to(device)
+        frame_mask = event["frame_mask"].unsqueeze(0).to(device)
         event_id = event["event_id"]
         label = int(event["label"].item())
     else:
@@ -332,8 +316,9 @@ def main() -> None:
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
     with torch.inference_mode():
-        logits, sync_gap_score = model.forward_with_sync_gap(
+        logits = model(
             sample,
+            frame_mask=frame_mask,
             features=features,
             feature_mask=feature_mask,
         )
@@ -341,13 +326,18 @@ def main() -> None:
         torch.cuda.synchronize(device)
 
     report = {
+        "purpose": "wiring_check_only_not_a_reported_experiment",
         "model": FUSION_MODEL_NAME,
         "pretrained": False,
         "device": str(device),
         "input_shape": list(sample.shape),
         "evidence_fields": list(FUSION_EVIDENCE_FIELDS),
+        "evidence_version": EVIDENCE_VERSION,
+        "evidence_shape": list(features.shape),
+        "evidence_mask": feature_mask.squeeze(0).tolist(),
+        "valid_frames": int(frame_mask.sum().item()) if frame_mask is not None else args.frames,
+        "closure_offset_definition": CLOSURE_OFFSET_DEFINITION,
         "output_shape": list(logits.shape),
-        "sync_gap_score": float(sync_gap_score.item()),
         "event_id": event_id,
         "label": label,
         "parameters": parameter_counts(model),
@@ -355,6 +345,10 @@ def main() -> None:
             torch.cuda.max_memory_allocated(device) if device.type == "cuda" else None
         ),
     }
+    if not torch.isfinite(logits).all():
+        raise RuntimeError("Fusion forward pass returned non-finite logits")
+    if args.report is not None:
+        atomic_write_json(args.report, report)
     print(json.dumps(report, indent=2))
 
 

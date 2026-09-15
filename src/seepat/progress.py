@@ -6,8 +6,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from time import sleep
 
-from seepat.artifacts import stable_id
+from seepat.artifacts import file_sha256, stable_id
 from seepat.config import load_pipeline_settings
+from seepat.live_progress import format_live_progress, live_progress_path
 from seepat.pipeline import PIPELINE_VERSION, selected_manifest_rows
 
 
@@ -102,6 +103,23 @@ def _completed_history_epochs(path: Path) -> int:
         return 0
     epochs = [row.get("epoch", 0) for row in value if isinstance(row, dict)]
     return max((int(epoch) for epoch in epochs), default=0)
+
+
+def read_live_workflow_progress(config_path: Path) -> dict[str, object]:
+    """Read one small status file without importing models or rehashing the dataset."""
+    from seepat.workflow import load_workflow_settings
+
+    settings = load_workflow_settings(config_path)
+    record = _read_run_record(live_progress_path(settings.report_path))
+    if not record or record.get("config_sha256") != file_sha256(config_path):
+        return {
+            "status": "unavailable",
+            "message": (
+                "No live report for this config yet. An already-running old workflow "
+                "must be restarted once to publish audit progress."
+            ),
+        }
+    return record
 
 
 def read_workflow_progress(config_path: Path) -> dict[str, object]:
@@ -244,9 +262,13 @@ def main() -> None:
     source.add_argument("--workflow-config", type=Path)
     parser.add_argument("--limit", type=int)
     parser.add_argument(
+        "--verify", action="store_true",
+        help="Recheck artifact hashes instead of reading the lightweight live workflow report",
+    )
+    parser.add_argument(
         "--watch-seconds",
         type=float,
-        help="Refresh until every requested video or workflow stage is current",
+        help="Refresh until the workflow reports completion, or all requested videos finish",
     )
     args = parser.parse_args()
     if args.watch_seconds is not None and args.watch_seconds <= 0:
@@ -256,9 +278,14 @@ def main() -> None:
         if args.workflow_config is not None:
             if args.limit is not None:
                 parser.error("--limit can only be used with --config")
-            progress = read_workflow_progress(args.workflow_config)
-            finished = bool(progress["all_current"])
-            formatted = format_workflow_progress(progress)
+            if args.watch_seconds is not None and not args.verify:
+                progress = read_live_workflow_progress(args.workflow_config)
+                finished = progress.get("status") in {"complete", "failed", "interrupted"}
+                formatted = format_live_progress(progress)
+            else:
+                progress = read_workflow_progress(args.workflow_config)
+                finished = bool(progress["all_current"])
+                formatted = format_workflow_progress(progress)
         else:
             progress = read_progress(args.config, limit=args.limit)
             finished = progress["videos_pending"] == 0

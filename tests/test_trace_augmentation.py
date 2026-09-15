@@ -43,7 +43,13 @@ def test_visual_augmentation_preserves_originals_resumes_and_verifies_hashes(tmp
 
     monkeypatch.setattr(aug, "MouthEventAnalyzer", Analyzer)
     original = file_sha256(Path(row["vild_trace_path"]))
-    aug.run_trace_augmentation(job)
+    updates = []
+    aug.run_trace_augmentation(job, progress=lambda *args: updates.append(args))
+    assert updates == [
+        ("verify augmentation cache", 0, 0, ""),
+        ("augment visual traces", 0, 1, "a"),
+        ("augment visual traces", 1, 1, "reused=0; failures=0"),
+    ]
     assert len(calls) == 1
     assert file_sha256(Path(row["vild_trace_path"])) == original
     assert aug.augmentation_outputs_are_current(job)

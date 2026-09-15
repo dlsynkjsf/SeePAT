@@ -19,6 +19,7 @@ from seepat.artifacts import (
     read_gzip_json,
     stable_id,
 )
+from seepat.live_progress import ProgressCallback
 from seepat.preprocessing.face import MouthEventAnalyzer
 from seepat.preprocessing.vild import load_vild_trace
 
@@ -215,8 +216,12 @@ def augmentation_outputs_are_current(job: TraceAugmentationJob) -> bool:
         return False
 
 
-def run_trace_augmentation(job: TraceAugmentationJob) -> dict[str, object]:
+def run_trace_augmentation(
+    job: TraceAugmentationJob, progress: ProgressCallback | None = None,
+) -> dict[str, object]:
     """Decode selected videos only; never invoke audio, MFA, or event preprocessing."""
+    if progress is not None:
+        progress("verify augmentation cache", 0, 0, "")
     if augmentation_outputs_are_current(job):
         return json.loads((job.output_dir / "summary.json").read_text(encoding="utf-8"))
     contract = measurement_contract(job)
@@ -241,6 +246,8 @@ def run_trace_augmentation(job: TraceAugmentationJob) -> dict[str, object]:
     atomic_write_json(job.output_dir / "summary.json", summary)
     try:
         for video_id, rows in selected:
+            if progress is not None:
+                progress("augment visual traces", summary["videos_finished"], len(selected), video_id)
             row = rows[0]
             try:
                 trace = trace_for_row(row)
@@ -322,7 +329,8 @@ def run_trace_augmentation(job: TraceAugmentationJob) -> dict[str, object]:
                     )
                 },
             )
-            print(f"[{job.name}] traces {summary['videos_finished']}/{len(selected)}", flush=True)
+            if progress is None:
+                print(f"[{job.name}] traces {summary['videos_finished']}/{len(selected)}", flush=True)
     finally:
         if analyzer is not None:
             analyzer.close()
@@ -349,4 +357,7 @@ def run_trace_augmentation(job: TraceAugmentationJob) -> dict[str, object]:
         raise RuntimeError(
             f"[{job.name}] augmentation failed; review {job.output_dir / 'summary.json'}"
         )
+    if progress is not None:
+        progress("augment visual traces", len(selected), len(selected),
+                 f"reused={summary['videos_reused']}; failures=0")
     return summary

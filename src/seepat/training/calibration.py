@@ -21,6 +21,7 @@ from seepat.artifacts import (
     read_csv_rows,
     stable_id,
 )
+from seepat.live_progress import ProgressCallback
 from seepat.preprocessing.augmentation import (
     augmented_trace_for_row,
     group_video_rows,
@@ -131,14 +132,18 @@ def _event_minimum(trace: dict[str, object], row: dict[str, str]) -> dict[str, o
 
 
 def _fit_population(
-    train_rows: list[dict[str, str]], options: CalibrationOptions
+    train_rows: list[dict[str, str]], options: CalibrationOptions,
+    progress: ProgressCallback | None = None,
 ) -> dict[str, object]:
     if not train_rows or any(row.get("dataset_split") != "train" for row in train_rows):
         raise ValueError("Population fitting requires an exclusively Train manifest")
     samples: list[tuple[float, float]] = []
     genuine_minima: dict[str, list[tuple[float, float]]] = defaultdict(list)
     reference_videos = 0
-    for rows in group_video_rows(train_rows).values():
+    groups = group_video_rows(train_rows)
+    for index, (video_id, rows) in enumerate(groups.items()):
+        if progress is not None:
+            progress("fit Train population", index, len(groups), video_id)
         # One decompression per video in this pass, regardless of event count.
         trace = augmented_trace_for_row(rows[0])
         references = reference_samples(trace, options)
@@ -153,6 +158,8 @@ def _fit_population(
                 genuine_minima[row["phoneme"].lower()].append(
                     (float(minimum["face_bbox_size_px"]), float(minimum["raw_vild_px"]))
                 )
+    if progress is not None:
+        progress("fit Train population", len(groups), len(groups), "")
     regression = _linear_model(samples)
     expectations = {}
     for phoneme, minima in sorted(genuine_minima.items()):
@@ -272,6 +279,7 @@ def _score_manifests(
     artifact: dict[str, object],
     manifests: dict[str, Path],
     output_dir: Path,
+    progress: ProgressCallback | None = None,
 ) -> dict[str, object]:
     options = CalibrationOptions(**artifact["options"])
     options.validate()
@@ -284,6 +292,8 @@ def _score_manifests(
         if not grouped:
             raise ValueError(f"Scoring manifest is empty: {manifest}")
         for index, (video_id, group) in enumerate(grouped.items(), 1):
+            if progress is not None:
+                progress(f"calibrate {name} videos", index - 1, len(grouped), video_id)
             key = stable_id(
                 json.dumps(
                     {"artifact": artifact_key, "rows": group, "sklearn": sklearn.__version__},
@@ -316,6 +326,8 @@ def _score_manifests(
                     "videos_requested": len(grouped),
                 },
             )
+        if progress is not None:
+            progress(f"calibrate {name} videos", len(grouped), len(grouped), "")
         path = output_dir / f"events_{name}_calibrated.csv"
         atomic_write_csv(path, [by_event[row["event_id"]] for row in rows])
         scored_paths[name], hashes[name] = path.as_posix(), file_sha256(path)
@@ -336,6 +348,7 @@ def fit_and_score_calibration(
     score_manifests: dict[str, Path],
     output_dir: Path,
     options: CalibrationOptions = DEFAULT_CALIBRATION_OPTIONS,
+    progress: ProgressCallback | None = None,
 ) -> dict[str, object]:
     options.validate()
     _validate_manifests(score_manifests)
@@ -363,7 +376,7 @@ def fit_and_score_calibration(
     if artifact is None:
         artifact = {
             **population_key,
-            **_fit_population(train_rows, options),
+            **_fit_population(train_rows, options, progress),
             "fit_population": "label-independent eligible Train non-speech frames",
             "phoneme_expectation_population": "genuine Train events only",
             "isolation_forest_population": "each input video's own non-speech frames",
@@ -373,7 +386,7 @@ def fit_and_score_calibration(
         atomic_write_json(path, artifact)
         atomic_write_json(path.with_suffix(".record.json"), {"sha256": file_sha256(path)})
     summary = {
-        **_score_manifests(artifact, score_manifests, output_dir),
+        **_score_manifests(artifact, score_manifests, output_dir, progress),
         "calibration_version": CALIBRATION_VERSION,
         "calibration": path.as_posix(),
         "calibration_sha256": file_sha256(path),

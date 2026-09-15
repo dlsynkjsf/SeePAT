@@ -124,6 +124,54 @@ def test_preflight_batch_limits_must_be_paired_and_positive() -> None:
         TrainingOptions(max_train_batches=0, max_validation_batches=1).validate()
 
 
+@pytest.mark.parametrize("overflow_batches", [1, 2])
+def test_amp_overflow_counts_only_updates_and_rejects_empty_training(
+    tmp_path: Path, monkeypatch, overflow_batches: int,
+) -> None:
+    # Exercise the real scaler's skipped-step behavior on CPU without a GPU job.
+    scaler = torch.amp.GradScaler("cpu", init_scale=8.0)
+    monkeypatch.setattr(torch.amp, "GradScaler", lambda *args, **kwargs: scaler)
+    model = TinyVideoClassifier()
+    original_weight = model.classifier.weight.detach().clone()
+    backward_calls = 0
+
+    def overflow(gradient):
+        nonlocal backward_calls
+        backward_calls += 1
+        return torch.full_like(gradient, float("inf")) if backward_calls <= overflow_batches else gradient
+
+    model.classifier.weight.register_hook(overflow)
+    arguments = {
+        "model": model,
+        "train_dataset": TinyEventDataset("train"),
+        "validation_dataset": TinyEventDataset("val"),
+        "output_dir": tmp_path,
+        "options": TrainingOptions(
+            epochs=1, batch_size=2, max_train_batches=2, max_validation_batches=1,
+        ),
+        "device": torch.device("cpu"),
+        "resume_contract": {"model": "tiny"},
+    }
+    if overflow_batches == 2:
+        with pytest.raises(RuntimeError, match="No optimizer updates"):
+            train_model(**arguments)
+        report = json.loads((tmp_path / "run.json").read_text())
+        assert report["status"] == "failed"
+        assert report["global_step"] == 0
+        assert torch.equal(model.classifier.weight, original_weight)
+        assert not (tmp_path / "checkpoint_last.pt").exists()
+    else:
+        report = train_model(**arguments)
+        assert report["status"] == "complete"
+        assert report["global_step"] == 1
+        assert not torch.equal(model.classifier.weight, original_weight)
+        checkpoint = torch.load(tmp_path / "checkpoint_last.pt", weights_only=False)
+        assert {int(s["step"]) for s in checkpoint["optimizer_state"]["state"].values()} == {1}
+        assert checkpoint["history"][0]["skipped_optimizer_steps"] == 1
+    assert report["optimizer_steps"] == 2 - overflow_batches
+    assert report["skipped_optimizer_steps"] == overflow_batches
+
+
 def test_training_writes_metrics_and_resumes_at_next_epoch(tmp_path: Path) -> None:
     output_dir = tmp_path / "training"
     train_dataset = TinyEventDataset("train")

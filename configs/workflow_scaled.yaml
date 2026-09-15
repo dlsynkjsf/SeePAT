@@ -129,7 +129,7 @@ model_training:
     model: efficientnet_v2_s_tempcnn
     train_manifest: data/training/train-subset5000/events_train.csv
     validation_manifest: data/training/val-subset1000/events_val.csv
-    output_dir: outputs/training/local_cnn_temporal_preflight_guarded
+    output_dir: outputs/training/local_cnn_temporal_preflight_guarded_fp32
     project_root: .
     device: cuda
     pretrained: false
@@ -143,7 +143,34 @@ model_training:
       sequence_length: 16
       image_size: 224
       seed: 20260903
-      amp: true
+      amp: false  # The earlier AMP preflight completed without an optimizer update.
+      freeze_backbone: true
+      class_weighting: balanced
+      early_stopping_patience: 3
+      max_train_batches: 2
+      max_validation_batches: 1
+
+  # Commit 2: isolated fusion state; two bounded epochs, no weight downloads.
+  # The optional first-epoch preflight config uses this same output directory.
+  - name: local-fusion-preflight
+    model: swin3d_b_vild_fusion
+    train_manifest: outputs/numerical_calibration/guarded_per_video_v3/events_train_calibrated.csv
+    validation_manifest: outputs/numerical_calibration/guarded_per_video_v3/events_val_calibrated.csv
+    output_dir: outputs/training/local_fusion_preflight_guarded_v3
+    project_root: .
+    device: cuda
+    pretrained: false
+    options:
+      epochs: 2
+      batch_size: 1
+      workers: 0
+      learning_rate: 0.0001
+      weight_decay: 0.01
+      gradient_accumulation_steps: 2
+      sequence_length: 16
+      image_size: 224
+      seed: 20260915
+      amp: false  # A one-update preflight must not be consumed by AMP scale warmup.
       freeze_backbone: true
       class_weighting: balanced
       early_stopping_patience: 3

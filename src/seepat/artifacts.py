@@ -5,6 +5,19 @@ import gzip
 import hashlib
 import json
 from pathlib import Path
+from time import sleep
+
+
+def _replace_with_retry(temporary: Path, target: Path) -> None:
+    """Allow short Windows reader/scanner locks without giving up atomic replacement."""
+    for attempt in range(6):
+        try:
+            temporary.replace(target)
+            return
+        except PermissionError as error:
+            if getattr(error, "winerror", None) not in {5, 32, 33} or attempt == 5:
+                raise
+            sleep(0.05 * 2**attempt)
 
 
 def atomic_write_json(path: Path, value: object) -> None:
@@ -12,7 +25,7 @@ def atomic_write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
     temporary.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    _replace_with_retry(temporary, path)
 
 
 def atomic_write_gzip_json(path: Path, value: object) -> None:
@@ -21,7 +34,7 @@ def atomic_write_gzip_json(path: Path, value: object) -> None:
     temporary = path.with_name(f".{path.name}.tmp")
     encoded = (json.dumps(value, separators=(",", ":")) + "\n").encode("utf-8")
     temporary.write_bytes(gzip.compress(encoded, compresslevel=6, mtime=0))
-    temporary.replace(path)
+    _replace_with_retry(temporary, path)
 
 
 def atomic_write_csv(path: Path, rows: list[dict[str, object]]) -> None:
@@ -34,7 +47,7 @@ def atomic_write_csv(path: Path, rows: list[dict[str, object]]) -> None:
         if fieldnames:
             writer.writeheader()
             writer.writerows(rows)
-    temporary.replace(path)
+    _replace_with_retry(temporary, path)
 
 
 def read_csv_rows(path: Path) -> list[dict[str, str]]:

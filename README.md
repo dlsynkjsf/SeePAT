@@ -16,5 +16,10 @@ label-independent Train references; phoneme expectations use genuine Train
 events. Each input video fits its own Isolation Forest from its eligible
 non-speech frames. Insufficient references remain masked, with no pooled
 fallback. Train parameters stay frozen when scoring Validation or later Test
-inputs. The implementation passes unit tests; real-data calibration and final
-multimodal fusion still require validation.
+inputs. Scaled calibration passed artifact and coverage checks. Fusion now
+combines Swin, CNN-temporal, and calibrated evidence with a separate mask for
+every numerical feature and independent resumable training. Closure offset is
+measured timing in seconds, not a separately trained anomaly score. Unit tests
+pass. Training counts completed optimizer updates and rejects zero-update epochs;
+full-precision CNN/fusion preflights passed with verified updates and fusion
+checkpoint resume. Model experiments remain pending.

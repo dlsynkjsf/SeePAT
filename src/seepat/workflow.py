@@ -12,6 +12,7 @@ import yaml
 
 from seepat.artifacts import atomic_write_json, read_csv_rows, stable_id
 from seepat.config import PipelineSettings, load_pipeline_settings
+from seepat.live_progress import ProgressCallback, WorkflowProgress
 from seepat.pipeline import PIPELINE_VERSION, run_pipeline
 from seepat.preprocessing.augmentation import TraceAugmentationJob, run_trace_augmentation
 from seepat.preprocessing.contract import audit_preprocessing_contract
@@ -261,6 +262,7 @@ def _sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
 
 def preprocessing_outputs_are_current(
     settings: PipelineSettings,
+    progress: ProgressCallback | None = None,
 ) -> bool:
     output_dir = settings.preprocessing.output_dir
     summary_path = output_dir / "run_summary.json"
@@ -306,12 +308,16 @@ def preprocessing_outputs_are_current(
         trace_rows = read_csv_rows(trace_index_path)
         if summary.get("vild_trace_videos") != len(trace_rows):
             return False
-        for row in trace_rows:
+        for index, row in enumerate(trace_rows):
+            if progress is not None:
+                progress("verify preprocessing traces", index, len(trace_rows), row["video_id"])
             trace_path = Path(row["vild_trace_path"])
             if not trace_path.is_file() or row["vild_trace_sha256"] != _sha256(
                 trace_path
             ):
                 return False
+        if progress is not None:
+            progress("verify preprocessing traces", len(trace_rows), len(trace_rows), "")
         expected_trace_ids = {
             row["video_id"]
             for row in video_rows
@@ -376,9 +382,14 @@ def training_outputs_are_current(
 def run_workflow_job(
     job: WorkflowJob,
     retry_failed: bool = False,
+    progress: ProgressCallback | None = None,
 ) -> dict[str, object]:
     settings = load_pipeline_settings(job.pipeline_config, PIPELINE_VERSION)
-    preprocessing_current = preprocessing_outputs_are_current(settings)
+    if progress is not None:
+        progress("verify preprocessing cache", 0, 0, "")
+    preprocessing_current = preprocessing_outputs_are_current(
+        settings, **({"progress": progress} if progress is not None else {})
+    )
 
     if preprocessing_current and not retry_failed:
         print(f"[{job.name}] preprocessing: skipped (artifacts are current)")
@@ -389,6 +400,8 @@ def run_workflow_job(
     else:
         reason = "retrying cached failures" if retry_failed else "artifacts are missing or stale"
         print(f"[{job.name}] preprocessing: running ({reason})")
+        if progress is not None:
+            progress("preprocess videos", 0, 0, "")
         pipeline_summary = run_pipeline(
             job.pipeline_config,
             retry_failed=retry_failed,
@@ -399,9 +412,12 @@ def run_workflow_job(
     if settings.preprocessing.vild_trace.enabled:
         print(f"[{job.name}] preprocessing contract: auditing")
         contract_summary = audit_preprocessing_contract(
-            settings.preprocessing.output_dir
+            settings.preprocessing.output_dir,
+            **({"progress": progress} if progress is not None else {}),
         )
 
+    if progress is not None:
+        progress("verify training manifest", 0, 0, "")
     manifest_current = training_outputs_are_current(settings, job.manifest_output_dir)
     if manifest_current:
         print(f"[{job.name}] training manifest: skipped (artifacts are current)")
@@ -409,6 +425,8 @@ def run_workflow_job(
         manifest_action = "skipped"
     else:
         print(f"[{job.name}] training manifest: building")
+        if progress is not None:
+            progress("build training manifest", 0, 0, "")
         manifest_summary = prepare_training_manifests(
             source_manifest_path=settings.dataset.pilot_manifest,
             video_manifest_path=settings.preprocessing.output_dir / "video_manifest.csv",
@@ -447,6 +465,7 @@ def _model_training_configuration_matches(
     run_record: dict[str, Any],
 ) -> bool:
     from seepat.training.train import (
+        FUSION_MODEL,
         SWIN_BASE_MODEL,
         model_contract_name,
         training_version_for_model,
@@ -468,6 +487,13 @@ def _model_training_configuration_matches(
         expected_options.pop("epochs")
         if job.device != "auto" and run_record.get("device") != job.device:
             return False
+        if job.model == FUSION_MODEL:
+            from seepat.evidence import calibrated_manifest_contract
+
+            train_contract = calibrated_manifest_contract(job.train_manifest)
+            val_contract = calibrated_manifest_contract(job.validation_manifest)
+            if train_contract != val_contract or contract.get("fusion_inputs") != train_contract:
+                return False
         return (
             run_record.get("run_type") == expected_type
             and recorded_options == expected_options
@@ -479,7 +505,7 @@ def _model_training_configuration_matches(
             and contract.get("validation_manifest_sha256")
             == _sha256(job.validation_manifest)
         )
-    except (OSError, TypeError, ValueError):
+    except (OSError, TypeError, ValueError, KeyError):
         return False
 
 
@@ -514,6 +540,7 @@ def model_training_outputs_are_current(job: ModelTrainingJob) -> bool:
 def _run_model_training(
     job: ModelTrainingJob,
     resume_from: Path | None,
+    progress: ProgressCallback | None = None,
 ) -> dict[str, object]:
     from seepat.training.train import train_from_manifests
 
@@ -527,10 +554,13 @@ def _run_model_training(
         pretrained=job.pretrained,
         model_name=job.model,
         resume_from=resume_from,
+        progress=progress,
     )
 
 
-def run_model_training_job(job: ModelTrainingJob) -> dict[str, object]:
+def run_model_training_job(
+    job: ModelTrainingJob, progress: ProgressCallback | None = None,
+) -> dict[str, object]:
     if model_training_outputs_are_current(job):
         print(f"[{job.name}] model training: skipped (artifacts are current)")
         return {
@@ -554,7 +584,7 @@ def run_model_training_job(job: ModelTrainingJob) -> dict[str, object]:
 
     action = "resumed" if resume_from is not None else "ran"
     print(f"[{job.name}] model training: {action}")
-    summary = _run_model_training(job, resume_from)
+    summary = _run_model_training(job, resume_from, progress=progress)
     return {"name": job.name, "action": action, "summary": summary}
 
 
@@ -567,7 +597,11 @@ def numerical_calibration_outputs_are_current(job: NumericalCalibrationJob) -> b
     )
 
 
-def run_numerical_calibration_job(job: NumericalCalibrationJob) -> dict[str, object]:
+def run_numerical_calibration_job(
+    job: NumericalCalibrationJob, progress: ProgressCallback | None = None,
+) -> dict[str, object]:
+    if progress is not None:
+        progress("verify calibration inputs and outputs", 0, 0, "")
     if numerical_calibration_outputs_are_current(job):
         print(f"[{job.name}] numerical calibration: skipped (artifacts are current)")
         return {
@@ -587,6 +621,7 @@ def run_numerical_calibration_job(job: NumericalCalibrationJob) -> dict[str, obj
             isolation_trees=job.isolation_trees,
             random_seed=job.random_seed,
         ),
+        progress=progress,
     )
     return {"name": job.name, "action": "ran", "summary": summary}
 
@@ -596,26 +631,37 @@ def run_workflow(
     retry_failed: bool = False,
 ) -> dict[str, object]:
     settings = load_workflow_settings(config_path)
-    jobs = [run_workflow_job(job, retry_failed=retry_failed) for job in settings.jobs]
     report: dict[str, object] = {
         "workflow_version": WORKFLOW_VERSION,
         "config": config_path.as_posix(),
-        "jobs": jobs,
+        "jobs": [],
     }
-    if settings.trace_augmentation_jobs:
-        report["trace_augmentation"] = [
-            run_trace_augmentation(job) for job in settings.trace_augmentation_jobs
-        ]
-    if settings.numerical_calibration_jobs:
-        report["numerical_calibration"] = [
-            run_numerical_calibration_job(job)
-            for job in settings.numerical_calibration_jobs
-        ]
-    if settings.model_training_jobs:
-        report["model_training"] = [
-            run_model_training_job(job) for job in settings.model_training_jobs
-        ]
-    atomic_write_json(settings.report_path, report)
+    tasks = (
+        [("jobs", job) for job in settings.jobs]
+        + [("trace_augmentation", job) for job in settings.trace_augmentation_jobs]
+        + [("numerical_calibration", job) for job in settings.numerical_calibration_jobs]
+        + [("model_training", job) for job in settings.model_training_jobs]
+    )
+    progress = WorkflowProgress(config_path, settings.report_path, len(tasks))
+    try:
+        for index, (kind, job) in enumerate(tasks, 1):
+            progress.start_job(index, job.name)
+            if kind == "jobs":
+                result = run_workflow_job(job, retry_failed=retry_failed, progress=progress)
+            elif kind == "trace_augmentation":
+                result = run_trace_augmentation(job, progress=progress)
+            elif kind == "numerical_calibration":
+                result = run_numerical_calibration_job(job, progress=progress)
+            else:
+                progress("verify or resume model job", 0, 0, "")
+                result = run_model_training_job(job, progress=progress)
+            report.setdefault(kind, []).append(result)
+        atomic_write_json(settings.report_path, report)
+    except BaseException as error:
+        progress.finish(error)
+        raise
+    progress.finish()
+
     return report
 
 
@@ -627,9 +673,13 @@ def main() -> None:
         action="store_true",
         help="Retry cached preprocessing failures while reusing completed work",
     )
+    parser.add_argument("--json", action="store_true", help="Also print the full final report")
     args = parser.parse_args()
     report = run_workflow(args.config, retry_failed=args.retry_failed)
-    print(json.dumps(report, indent=2))
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(f"Workflow complete. Report: {load_workflow_settings(args.config).report_path}")
 
 
 if __name__ == "__main__":

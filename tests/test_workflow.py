@@ -434,7 +434,7 @@ def test_model_training_job_runs_or_skips_as_needed(tmp_path: Path, monkeypatch)
     )
     monkeypatch.setattr(
         "seepat.workflow._run_model_training",
-        lambda current_job, resume_from: {"status": "complete"},
+        lambda current_job, resume_from, **kwargs: {"status": "complete"},
     )
 
     report = run_model_training_job(job)
@@ -486,7 +486,7 @@ def test_model_training_job_resumes_when_epoch_target_increases(
     )
     received_resume_path = None
 
-    def fake_training(current_job, resume_from):
+    def fake_training(current_job, resume_from, **kwargs):
         nonlocal received_resume_path
         received_resume_path = resume_from
         return {"status": "complete"}
@@ -520,13 +520,14 @@ def test_workflow_runs_model_training_after_preparation(tmp_path: Path, monkeypa
     monkeypatch.setattr("seepat.workflow.load_workflow_settings", lambda path: settings)
     monkeypatch.setattr(
         "seepat.workflow.run_workflow_job",
-        lambda job, retry_failed=False: calls.append("preparation") or {"name": job.name},
+        lambda job, **kwargs: calls.append("preparation") or {"name": job.name},
     )
     monkeypatch.setattr(
         "seepat.workflow.run_model_training_job",
-        lambda job: calls.append(f"model:{job.name}") or {"name": job.name},
+        lambda job, **kwargs: calls.append(f"model:{job.name}") or {"name": job.name},
     )
 
+    (tmp_path / "workflow.yaml").write_text("test config", encoding="utf-8")
     report = run_workflow(tmp_path / "workflow.yaml")
 
     assert calls == [
@@ -562,7 +563,8 @@ def test_workflow_orders_augmentation_before_calibration_and_preserves_model_job
     calls = []
     monkeypatch.setattr("seepat.workflow.load_workflow_settings", lambda p: settings)
     for function in ("run_trace_augmentation", "run_numerical_calibration_job", "run_model_training_job"):
-        monkeypatch.setattr("seepat.workflow." + function, lambda job: calls.append(job.name))
+        monkeypatch.setattr("seepat.workflow." + function, lambda job, **kwargs: calls.append(job.name))
+    (tmp_path / "workflow.yaml").write_text("test config", encoding="utf-8")
     run_workflow(tmp_path / "workflow.yaml")
     assert calls == ["augment", "calibrate", "swin"]
 

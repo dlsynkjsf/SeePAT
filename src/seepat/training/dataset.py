@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from seepat.artifacts import read_csv_rows
+from seepat.evidence import calibrated_manifest_contract, evidence_feature_values
 from seepat.evidence import evidence_coverage as _evidence_coverage
-from seepat.evidence import evidence_feature_values
 
 FEATURE_FIELDS = (
     "normalized_minimum_closure",
@@ -93,6 +93,7 @@ class MouthEventDataset:
         dataset_split: str | None = None,
         sequence_length: int = 16,
         image_size: int = 224,
+        require_calibration: bool = False,
     ) -> None:
         if sequence_length < 1:
             raise ValueError("sequence_length must be at least 1")
@@ -100,6 +101,13 @@ class MouthEventDataset:
             raise ValueError("image_size must be at least 1")
 
         rows = read_csv_rows(manifest_path)
+        self.calibration_contract = (
+            calibrated_manifest_contract(manifest_path, rows) if require_calibration else None
+        )
+        if require_calibration and dataset_split is not None and any(
+            row.get("dataset_split") != dataset_split for row in rows
+        ):
+            raise ValueError("Fusion training manifests must contain only the requested split")
         if dataset_split is not None:
             rows = [row for row in rows if row.get("dataset_split") == dataset_split]
         if not rows:
