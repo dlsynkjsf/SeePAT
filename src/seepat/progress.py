@@ -212,8 +212,12 @@ def read_workflow_progress(config_path: Path) -> dict[str, object]:
             "videos_requested": record.get("videos_requested", 0),
             "manifest": record.get("manifest", ""),
         })
+    from seepat.decision import decision_stage_status
+
+    decisions = [{"name": job.name, "stages": decision_stage_status(job)} for job in settings.decision_jobs]
+    current_stages += sum(status == "current" for row in decisions for status in row["stages"].values())
     total_stages = (2 * len(settings.jobs) + len(settings.model_training_jobs)
-                    + len(evidence_stages))
+                    + len(evidence_stages) + 3 * len(decisions))
     return {
         "workflow_config": config_path.as_posix(),
         "stages_current": current_stages,
@@ -222,6 +226,7 @@ def read_workflow_progress(config_path: Path) -> dict[str, object]:
         "preparation": preparation,
         "model_training": model_training,
         "evidence_stages": evidence_stages,
+        "decisions": decisions,
     }
 
 

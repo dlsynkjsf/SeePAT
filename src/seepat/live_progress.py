@@ -92,7 +92,7 @@ class WorkflowProgress:
         print(format_live_progress(self.record), flush=True)
         self.last_publish = time.monotonic()
 
-    def finish(self, error: BaseException | None = None) -> None:
+    def finish(self, error: BaseException | None = None, *, deferred: bool = False) -> None:
         self.record["status"] = (
             "interrupted"
             if isinstance(error, KeyboardInterrupt)
@@ -104,7 +104,8 @@ class WorkflowProgress:
             self.record["error"] = f"{type(error).__name__}: {error}"
         else:
             self.record.update(
-                phase="all configured jobs completed",
+                phase=("available work completed; decisions await a trained checkpoint"
+                       if deferred else "all configured jobs completed"),
                 current_item="",
                 eta_seconds=0,
                 finished=self.record["jobs_total"],

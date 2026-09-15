@@ -22,4 +22,7 @@ every numerical feature and independent resumable training. Closure offset is
 measured timing in seconds, not a separately trained anomaly score. Unit tests
 pass. Training counts completed optimizer updates and rejects zero-update epochs;
 full-precision CNN/fusion preflights passed with verified updates and fusion
-checkpoint resume. Model experiments remain pending.
+checkpoint resume. Validation thresholds are bound to checkpoint/calibration
+provenance, and explanations consume verified frozen verdicts. The restartable
+decision stages await a completed model experiment; external evaluation remains
+locked. Model experiments and thesis performance validation remain pending.

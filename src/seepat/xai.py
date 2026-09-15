@@ -9,16 +9,15 @@ The trace layer is strictly downstream of the verdict:
   human-readable text, with grounding rules that forbid inventing evidence.
 
 The default client is a deterministic template renderer that runs fully
-offline. :class:`OpenAICompatibleClient` provides the paper's GPT-4o-mini
-integration over plain HTTP (no extra dependency); LangChain or any other
-orchestrator can be used by implementing the same :class:`ReasoningClient`
-protocol.
+offline. :class:`OpenAICompatibleClient` provides an opt-in HTTP text client;
+the model response is advisory text and never enters the prediction path.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import urllib.error
 import urllib.request
@@ -29,15 +28,16 @@ from typing import Protocol
 from seepat.artifacts import atomic_write_json, file_sha256, read_csv_rows
 from seepat.evidence import EVIDENCE_LABELS, FUSION_EVIDENCE_FIELDS
 
-FORENSIC_TRACE_VERSION = "forensic-trace-v1"
+FORENSIC_TRACE_VERSION = "forensic-trace-v2"
 SYSTEM_GROUNDING_RULES = (
     "You are a forensic explanation writer for the SeePAT audio-visual "
     "deepfake detector. You receive frozen numerical evidence as JSON. "
     "Rules: (1) every statement must be grounded in the supplied JSON; "
     "(2) never change, recompute or contradict probabilities, thresholds or "
     "verdicts; (3) never claim evidence that is absent; explicitly mention "
-    "missing measurements; (4) explain which measurements support or "
-    "contradict manipulation, in the Observation-Thought-Action style; "
+    "missing measurements; (4) describe the supplied observations without "
+    "claiming a measurement caused the prediction; closure offset is timing "
+    "in seconds, not a learned anomaly probability; "
     "(5) the trace is explanatory only and must not propose a different verdict."
 )
 
@@ -61,7 +61,11 @@ def _event_evidence(record: dict[str, str]) -> dict[str, str]:
     evidence: dict[str, str] = {}
     for field in FUSION_EVIDENCE_FIELDS:
         value = record.get(field, "").strip()
-        if value:
+        try:
+            available = record.get(f"{field}_available", "").lower() == "true" and math.isfinite(float(value))
+        except ValueError:
+            available = False
+        if available:
             evidence[EVIDENCE_LABELS[field]] = value
     return evidence
 
@@ -82,8 +86,24 @@ def build_evidence_bundle(
         if not path.is_file():
             raise FileNotFoundError(f"Verdict artifact is missing: {path}")
     evaluation = _read_json(evaluation_path)
+    from seepat.verdict import VERDICT_VERSION
+
+    if evaluation.get("verdict_version") != VERDICT_VERSION or evaluation.get("status") != "complete":
+        raise ValueError("Explanation requires a completed current-version verdict")
+    expected_hashes = evaluation.get("output_sha256", {})
+    if not isinstance(expected_hashes, dict) or any(
+        expected_hashes.get(key) != file_sha256(path)
+        for key, path in (("videos", verdicts_path), ("events", events_path))
+    ):
+        raise ValueError("Frozen verdict output hash mismatch")
     verdict_rows = read_csv_rows(verdicts_path)
     event_rows = read_csv_rows(events_path)
+    counts = {}
+    for event in event_rows:
+        identifier = event.get("video_id", "")
+        counts[identifier] = counts.get(identifier, 0) + 1
+    if any(int(row["event_count"]) != counts.pop(row["video_id"], 0) for row in verdict_rows) or counts:
+        raise ValueError("Verdict event counts disagree with the frozen event records")
     if video_id is not None:
         verdict_rows = [row for row in verdict_rows if row.get("video_id") == video_id]
         event_rows = [row for row in event_rows if row.get("video_id") == video_id]
@@ -96,8 +116,7 @@ def build_evidence_bundle(
 
     ordered_videos = sorted(
         verdict_rows,
-        key=lambda row: float(row.get("maximum_probability") or 0.0),
-        reverse=True,
+        key=lambda row: (-float(row.get("maximum_probability") or 0.0), row["video_id"]),
     )
     selected = ordered_videos[:max_videos]
     videos: list[dict[str, object]] = []
@@ -105,15 +124,16 @@ def build_evidence_bundle(
         identifier = row.get("video_id", "")
         events = events_by_video.get(identifier, [])
         events.sort(
-            key=lambda event: float(event.get("manipulated_probability") or 0.0),
-            reverse=True,
+            key=lambda event: (-float(event.get("manipulated_probability") or 0.0), event["event_id"]),
         )
         videos.append(
             {
                 "video_id": identifier,
                 "verdict": row.get("verdict", ""),
                 "maximum_probability": row.get("maximum_probability", ""),
-                "event_count": row.get("event_count", ""),
+                "event_count": len(events),
+                "events_reported": min(len(events), max_events),
+                "events_omitted": max(0, len(events) - max_events),
                 "events": [
                     {
                         "event_id": event.get("event_id", ""),
@@ -121,19 +141,17 @@ def build_evidence_bundle(
                         "manipulated_probability": event.get(
                             "manipulated_probability", ""
                         ),
-                        "sync_gap_score": event.get("sync_gap_score", ""),
                         "evidence": _event_evidence(event),
+                        "missing_fields": [
+                            label for label in EVIDENCE_LABELS.values()
+                            if label not in _event_evidence(event)
+                        ],
                     }
                     for event in events[:max_events]
                 ],
             }
         )
-    missing_evidence_events = sum(
-        1
-        for event in event_rows
-        for field in FUSION_EVIDENCE_FIELDS
-        if not event.get(field, "").strip()
-    )
+    missing_counts = [len(FUSION_EVIDENCE_FIELDS) - len(_event_evidence(event)) for event in event_rows]
     return {
         "trace_version": FORENSIC_TRACE_VERSION,
         "scope": {"video_id": video_id} if video_id else {"video_id": None},
@@ -158,11 +176,14 @@ def build_evidence_bundle(
         "split": evaluation.get("split"),
         "threshold": evaluation.get("threshold"),
         "aggregation": evaluation.get("aggregation"),
-        "videos_scored": len(verdict_rows),
+        "videos_scored": sum(row["verdict"] != "not_evaluated" for row in verdict_rows),
+        "videos_requested": len(verdict_rows),
+        "videos_not_evaluated": sum(row["verdict"] == "not_evaluated" for row in verdict_rows),
         "videos_reported": len(videos),
         "videos_omitted": max(0, len(verdict_rows) - len(videos)),
         "events_scored": len(event_rows),
-        "events_with_missing_evidence_values": missing_evidence_events,
+        "events_with_missing_evidence_values": sum(count > 0 for count in missing_counts),
+        "missing_evidence_values": sum(missing_counts),
         "videos": videos,
     }
 
@@ -178,11 +199,13 @@ def render_evidence_summary(bundle: dict[str, object]) -> str:
         )
     lines.append(
         f"Videos reported: {bundle.get('videos_reported')} of "
-        f"{bundle.get('videos_scored')} scored"
+        f"{bundle.get('videos_requested')} requested "
+        f"({bundle.get('videos_not_evaluated')} not evaluated)"
     )
     lines.append(
         f"Events scored: {bundle.get('events_scored')} "
-        f"(missing evidence values: {bundle.get('events_with_missing_evidence_values')})"
+        f"({bundle.get('events_with_missing_evidence_values')} events with "
+        f"{bundle.get('missing_evidence_values')} missing evidence values)"
     )
     lines.append("")
     videos = bundle.get("videos")
@@ -191,6 +214,10 @@ def render_evidence_summary(bundle: dict[str, object]) -> str:
         return "\n".join(lines)
     for video in videos:
         if not isinstance(video, dict):
+            continue
+        if video.get("verdict") == "not_evaluated":
+            lines.append(f"## Video {video.get('video_id')}: not evaluated (no scorable events)")
+            lines.append("")
             continue
         lines.append(
             f"## Video {video.get('video_id')}: {video.get('verdict')} "
@@ -211,10 +238,11 @@ def render_evidence_summary(bundle: dict[str, object]) -> str:
                 )
                 lines.append(
                     f"- Event {event.get('event_id')} (/{event.get('phoneme')}/): "
-                    f"p(manipulated)={event.get('manipulated_probability')}, "
-                    f"sync-gap={event.get('sync_gap_score')}"
+                    f"p(manipulated)={event.get('manipulated_probability')}"
                     + (f"; {detail}" if detail else "; no calibrated evidence available")
                 )
+                if event.get("missing_fields"):
+                    lines.append("  Missing: " + ", ".join(event["missing_fields"]))
         lines.append("")
     lines.append(
         "Note: this trace is explanatory only. It restates frozen numerical "
@@ -307,6 +335,19 @@ def generate_forensic_trace(
         max_events=max_events,
         max_videos=max_videos,
     )
+    protected = {Path(source["path"]).resolve() for source in bundle["sources"].values()}
+    evaluation = _read_json(verdict_dir / "evaluation.json")
+    for key in ("manifest", "checkpoint", "calibration_summary", "source_manifest"):
+        record = evaluation.get(key)
+        if isinstance(record, dict) and record.get("path"):
+            protected.add(Path(record["path"]).resolve())
+    threshold = evaluation.get("threshold", {})
+    if isinstance(threshold, dict) and threshold.get("artifact"):
+        protected.add(Path(threshold["artifact"]).resolve())
+        if threshold.get("predictions", {}).get("path"):
+            protected.add(Path(threshold["predictions"]["path"]).resolve())
+    if output_path.resolve() in protected:
+        raise ValueError("Explanation output must not overwrite prediction inputs or artifacts")
     deterministic_summary = render_evidence_summary(bundle)
     if client is None:
         trace_text = deterministic_summary
@@ -317,6 +358,8 @@ def generate_forensic_trace(
         trace_text = client.generate(system_prompt, user_prompt)
         mode = "reasoning-llm"
         client_label = client.label
+    if any(file_sha256(Path(source["path"])) != source["sha256"] for source in bundle["sources"].values()):
+        raise ValueError("Frozen verdict artifacts changed during explanation generation")
     artifact = {
         "trace_version": FORENSIC_TRACE_VERSION,
         "generated_at_utc": datetime.now(UTC).isoformat(),

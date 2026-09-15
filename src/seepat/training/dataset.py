@@ -94,6 +94,7 @@ class MouthEventDataset:
         sequence_length: int = 16,
         image_size: int = 224,
         require_calibration: bool = False,
+        allow_empty: bool = False,
     ) -> None:
         if sequence_length < 1:
             raise ValueError("sequence_length must be at least 1")
@@ -102,7 +103,8 @@ class MouthEventDataset:
 
         rows = read_csv_rows(manifest_path)
         self.calibration_contract = (
-            calibrated_manifest_contract(manifest_path, rows) if require_calibration else None
+            calibrated_manifest_contract(manifest_path, rows, allow_empty=allow_empty)
+            if require_calibration else None
         )
         if require_calibration and dataset_split is not None and any(
             row.get("dataset_split") != dataset_split for row in rows
@@ -110,7 +112,7 @@ class MouthEventDataset:
             raise ValueError("Fusion training manifests must contain only the requested split")
         if dataset_split is not None:
             rows = [row for row in rows if row.get("dataset_split") == dataset_split]
-        if not rows:
+        if not rows and not allow_empty:
             qualifier = f" for split {dataset_split!r}" if dataset_split else ""
             raise ValueError(f"Training manifest contains no events{qualifier}")
 

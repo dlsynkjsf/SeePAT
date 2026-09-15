@@ -9,8 +9,18 @@ torch = pytest.importorskip("torch")
 cv2 = pytest.importorskip("cv2")
 np = pytest.importorskip("numpy")
 verdict_module = pytest.importorskip("seepat.verdict")
-from seepat.artifacts import atomic_write_csv, read_csv_rows, stable_id
-from seepat.evidence import FUSION_EVIDENCE_FIELDS
+from seepat.artifacts import (
+    atomic_write_csv,
+    atomic_write_json,
+    file_sha256,
+    read_csv_rows,
+    stable_id,
+)
+from seepat.evidence import (
+    CALIBRATED_INPUT_VERSION,
+    FUSION_EVIDENCE_FIELDS,
+    calibrated_manifest_contract,
+)
 
 nn = torch.nn
 choose_threshold = verdict_module.choose_threshold
@@ -88,7 +98,7 @@ def _event_row(
         "event_id": event_id,
         "video_id": stable_id(file_name),
         "file": file_name,
-        "dataset_split": "test",
+        "dataset_split": "val",
         "source_group": file_name,
         "subject_id": "subject-a",
         "manipulation_modality": modality,
@@ -103,24 +113,46 @@ def _event_row(
         "normalized_minimum_closure": "0.002",
         "closure_duration_s": "0.2",
         "phone_duration_s": "0.08",
+        "calibration_version": CALIBRATED_INPUT_VERSION,
+        "isolation_forest_available": "True",
+        "isolation_forest_scope": "input_video",
+        "isolation_forest_unavailable_reason": "",
     }
 
 
-def _write_checkpoint(path: Path) -> None:
+def _seal_manifest(manifest: Path) -> None:
+    population = manifest.parent / "calibration.json"
+    atomic_write_json(population, {"calibration_version": CALIBRATED_INPUT_VERSION})
+    atomic_write_json(manifest.parent / "summary.json", {
+        "scored_manifests": {"val": manifest.as_posix()},
+        "scored_manifest_sha256": {"val": file_sha256(manifest)},
+        "calibration": population.as_posix(), "calibration_sha256": file_sha256(population),
+    })
+
+
+def _write_checkpoint(path: Path, manifest: Path) -> None:
     model = _tiny_fusion_model()
+    contract = {
+        "training_version": "hybrid-fusion-v3",
+        "model": "seepat.hybrid_fusion.swin3d_b_tempcnn_evidence",
+        "model_name": "swin3d_b_vild_fusion", "sequence_length": 4, "image_size": 8,
+        "validation_manifest_sha256": file_sha256(manifest),
+        "fusion_inputs": calibrated_manifest_contract(manifest, allow_empty=True),
+    }
     torch.save(
         {
             "checkpoint_type": "seepat_evaluation_model",
             "completed_epoch": 1,
             "model_state": model.state_dict(),
-            "resume_contract": {
-                "training_version": "hybrid-fusion-v3",
-                "model": "seepat.hybrid_fusion.swin3d_b_tempcnn_evidence",
-                "model_name": "swin3d_b_vild_fusion",
-            },
+            "resume_contract": contract,
+            "options": {"max_train_batches": None, "max_validation_batches": None},
         },
         path,
     )
+    atomic_write_json(path.parent / "run.json", {
+        "status": "complete", "run_type": "training_experiment", "global_step": 1,
+        "resume_contract": contract, "best_checkpoint": path.as_posix(),
+    })
 
 
 def _patch_builder(monkeypatch) -> None:
@@ -192,25 +224,17 @@ def test_run_verdict_aggregates_maximum_event_probability(
         [{"file": fake_file}, {"file": real_file}, {"file": missing_file}],
     )
     checkpoint_path = tmp_path / "checkpoint_best.pt"
-    _write_checkpoint(checkpoint_path)
+    _seal_manifest(manifest_path)
+    _write_checkpoint(checkpoint_path, manifest_path)
     threshold_path = tmp_path / "threshold.json"
-    threshold_path.write_text(
-        json.dumps(
-            {
-                "threshold_version": THRESHOLD_VERSION,
-                "threshold": 0.5,
-                "aggregation": "video",
-            }
-        ),
-        encoding="utf-8",
-    )
+    verdict_module.select_threshold(manifest_path, checkpoint_path, threshold_path, device_name="cpu")
 
     summary = run_verdict(
         manifest_path=manifest_path,
         checkpoint_path=checkpoint_path,
         output_dir=tmp_path / "out",
         threshold_artifact=threshold_path,
-        split="test",
+        split="val",
         source_manifest=source_path,
         project_root=tmp_path,
         device_name="cpu",
@@ -219,7 +243,7 @@ def test_run_verdict_aggregates_maximum_event_probability(
         image_size=8,
     )
 
-    assert summary["verdict_version"] == "verdict-v1"
+    assert summary["verdict_version"] == "verdict-v2"
     assert summary["threshold"]["source"] == "artifact"
     assert summary["event_count"] == 3
     assert summary["video_count"] == 3
@@ -243,6 +267,7 @@ def test_run_verdict_aggregates_maximum_event_probability(
     assert len(events) == 3
     for event in events:
         assert event["sync_gap_score"] == ""
+        assert event["evidence_available"] == "7"
         for field in FUSION_EVIDENCE_FIELDS:
             assert field in event
     evaluation = json.loads((tmp_path / "out" / "evaluation.json").read_text())

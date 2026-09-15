@@ -81,6 +81,7 @@ def closure_offset_s(row: dict[str, str]) -> float | None:
 def calibrated_manifest_contract(
     path: Path,
     rows: list[dict[str, str]] | None = None,
+    *, allow_empty: bool = False,
 ) -> dict[str, object]:
     """Verify fusion's calibrated CSV and bind its frozen population artifact.
 
@@ -96,7 +97,7 @@ def calibrated_manifest_contract(
         "isolation_forest_unavailable_reason",
         "isolation_forest_scope",
     }
-    if not rows or any(required - row.keys() for row in rows):
+    if (not rows and not allow_empty) or any(required - row.keys() for row in rows):
         raise ValueError("Fusion requires a calibrated manifest with all evidence columns")
     for row in rows:
         if row["calibration_version"] != CALIBRATED_INPUT_VERSION:

@@ -77,6 +77,8 @@ def aggregate_video_probabilities(
     ):
         if not video_id:
             raise ValueError("video ids must not be empty")
+        if not math.isfinite(probability) or not 0.0 <= probability <= 1.0:
+            raise ValueError("probabilities must be finite values between 0 and 1")
         if label not in {0, 1}:
             raise ValueError("video labels must be 0 or 1")
         previous_label = grouped_labels.setdefault(video_id, label)

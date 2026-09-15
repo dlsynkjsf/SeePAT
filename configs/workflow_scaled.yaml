@@ -68,6 +68,16 @@ dataset_subsetting:  # reference parameters for stage 0 (not read by seepat-work
       report: outputs/extract_val_subset1000.json
 
 report: outputs/workflow_scaled_summary.json
+decisions:
+  - name: validation-decisions
+    validation_manifest: outputs/numerical_calibration/guarded_per_video_v3/events_val_calibrated.csv
+    source_manifest: data/manifests/val_subset1000.csv
+    output_dir: outputs/decisions/guarded_fusion
+    # Set this to the selected best checkpoint only after a full model experiment.
+    # Preflight checkpoints are refused; null defers all three downstream stages.
+    checkpoint: null
+    device: cuda
+    batch_size: 1
 
 jobs:
   - name: train-subset5000

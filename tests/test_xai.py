@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from seepat.artifacts import atomic_write_csv
+from seepat.artifacts import atomic_write_csv, atomic_write_json, file_sha256
 from seepat.evidence import FUSION_EVIDENCE_FIELDS
 from seepat.xai import (
     FORENSIC_TRACE_VERSION,
@@ -22,7 +22,8 @@ def _write_verdict_dir(tmp_path: Path) -> Path:
     (verdict_dir / "evaluation.json").write_text(
         json.dumps(
             {
-                "verdict_version": "verdict-v1",
+                "verdict_version": "verdict-v2",
+                "status": "complete",
                 "model_name": "swin3d_b_vild_fusion",
                 "training_version": "hybrid-fusion-v1",
                 "split": "test",
@@ -68,6 +69,7 @@ def _write_verdict_dir(tmp_path: Path) -> Path:
         }
         for index, field in enumerate(FUSION_EVIDENCE_FIELDS):
             row[field] = str(index) if complete else ""
+            row[f"{field}_available"] = complete
         return row
 
     atomic_write_csv(
@@ -78,6 +80,13 @@ def _write_verdict_dir(tmp_path: Path) -> Path:
             event_row("quiet-a", "video-quiet", 0.05, complete=False),
         ],
     )
+    evaluation_path = verdict_dir / "evaluation.json"
+    evaluation = json.loads(evaluation_path.read_text())
+    evaluation["output_sha256"] = {
+        "events": file_sha256(verdict_dir / "event_predictions.csv"),
+        "videos": file_sha256(verdict_dir / "video_verdicts.csv"),
+    }
+    atomic_write_json(evaluation_path, evaluation)
     return verdict_dir
 
 
@@ -92,7 +101,8 @@ def test_build_evidence_bundle_reports_sources_and_top_events(tmp_path: Path) ->
     assert bundle["videos"][0]["video_id"] == "video-flagged"
     assert bundle["videos"][0]["events"][0]["event_id"] == "flagged-b"
     assert bundle["videos"][0]["events"][0]["evidence"]["phoneme-viseme residual (z)"]
-    assert bundle["events_with_missing_evidence_values"] > 0
+    assert bundle["events_with_missing_evidence_values"] == 1
+    assert bundle["missing_evidence_values"] == 7
     for source in bundle["sources"].values():
         assert source["sha256"]
 

@@ -52,6 +52,7 @@ MANIFEST_FIELDS = (
     "source_group",
     "selection_order",
     "sampling_seed",
+    "dataset_source",
 )
 WHOLE_VIDEO_END_S = 1_000_000_000.0
 
@@ -91,8 +92,8 @@ def build_deepfake_eval_manifest(
 ) -> dict[str, object]:
     if default_modality not in MODALITY_MAP:
         raise ValueError("default_modality must be one of: audio, visual, both")
-    if not split.strip():
-        raise ValueError("split must not be empty")
+    if split not in {"test", "external-test"}:
+        raise ValueError("Deepfake-Eval must remain a locked test split")
     records = _read_index(index_path)
 
     rows: list[dict[str, object]] = []
@@ -145,6 +146,7 @@ def build_deepfake_eval_manifest(
                 "source_group": original,
                 "selection_order": row_number - 1,
                 "sampling_seed": sampling_seed,
+                "dataset_source": DEEPFAKE_EVAL_SOURCE,
             }
         )
         label_counts["fake" if is_fake else "real"] += 1

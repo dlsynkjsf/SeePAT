@@ -12,6 +12,7 @@ import yaml
 
 from seepat.artifacts import atomic_write_json, read_csv_rows, stable_id
 from seepat.config import PipelineSettings, load_pipeline_settings
+from seepat.decision import DecisionJob, run_decision_job
 from seepat.live_progress import ProgressCallback, WorkflowProgress
 from seepat.pipeline import PIPELINE_VERSION, run_pipeline
 from seepat.preprocessing.augmentation import TraceAugmentationJob, run_trace_augmentation
@@ -64,6 +65,7 @@ class WorkflowSettings:
     report_path: Path
     numerical_calibration_jobs: tuple[NumericalCalibrationJob, ...] = ()
     trace_augmentation_jobs: tuple[TraceAugmentationJob, ...] = ()
+    decision_jobs: tuple[DecisionJob, ...] = ()
 
 
 def _require_mapping(value: object, description: str) -> dict[str, Any]:
@@ -233,7 +235,25 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
                for old in augmentation_jobs):
             raise ValueError("Duplicate trace augmentation name or output directory")
         augmentation_jobs.append(augmentation)
-    if not (jobs or augmentation_jobs or numerical_calibration_jobs or model_training_jobs):
+    decision_jobs = []
+    for raw_job in config.get("decisions", []):
+        item = _require_mapping(raw_job, "Validation decision job")
+        if item.get("split", "val") != "val" or item.get("dataset_source", "AV-Deepfake1M++") != "AV-Deepfake1M++":
+            raise ValueError("Decision workflow is restricted to AV++ Validation; external/test remains locked")
+        decision = DecisionJob(
+            name=str(item["name"]), validation_manifest=Path(item["validation_manifest"]),
+            output_dir=Path(item["output_dir"]),
+            checkpoint=Path(item["checkpoint"]) if item.get("checkpoint") else None,
+            source_manifest=Path(item["source_manifest"]) if item.get("source_manifest") else None,
+            project_root=Path(item.get("project_root", ".")), device=str(item.get("device", "auto")),
+            batch_size=int(item.get("batch_size", 1)),
+        )
+        if not decision.name or decision.batch_size < 1 or any(
+            old.name == decision.name or old.output_dir == decision.output_dir for old in decision_jobs
+        ):
+            raise ValueError("Decision jobs require unique names/outputs and positive batch size")
+        decision_jobs.append(decision)
+    if not (jobs or augmentation_jobs or numerical_calibration_jobs or model_training_jobs or decision_jobs):
         raise ValueError("Workflow configuration must contain at least one job")
     report_path = Path(str(config.get("report", "outputs/workflow_summary.json")))
     return WorkflowSettings(
@@ -242,6 +262,7 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
         report_path=report_path,
         numerical_calibration_jobs=tuple(numerical_calibration_jobs),
         trace_augmentation_jobs=tuple(augmentation_jobs),
+        decision_jobs=tuple(decision_jobs),
     )
 
 
@@ -641,6 +662,7 @@ def run_workflow(
         + [("trace_augmentation", job) for job in settings.trace_augmentation_jobs]
         + [("numerical_calibration", job) for job in settings.numerical_calibration_jobs]
         + [("model_training", job) for job in settings.model_training_jobs]
+        + [("decisions", job) for job in settings.decision_jobs]
     )
     progress = WorkflowProgress(config_path, settings.report_path, len(tasks))
     try:
@@ -652,6 +674,8 @@ def run_workflow(
                 result = run_trace_augmentation(job, progress=progress)
             elif kind == "numerical_calibration":
                 result = run_numerical_calibration_job(job, progress=progress)
+            elif kind == "decisions":
+                result = run_decision_job(job, progress=progress)
             else:
                 progress("verify or resume model job", 0, 0, "")
                 result = run_model_training_job(job, progress=progress)
@@ -660,7 +684,7 @@ def run_workflow(
     except BaseException as error:
         progress.finish(error)
         raise
-    progress.finish()
+    progress.finish(deferred=any(row["action"] == "deferred" for row in report.get("decisions", [])))
 
     return report
 
