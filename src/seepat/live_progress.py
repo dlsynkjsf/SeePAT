@@ -50,7 +50,10 @@ def format_live_progress(record: dict[str, object]) -> str:
 
 
 class WorkflowProgress:
-    def __init__(self, config: Path, report: Path, jobs_total: int):
+    def __init__(
+        self, config: Path, report: Path, jobs_total: int,
+        model_training_config: Path | None = None,
+    ):
         self.path = live_progress_path(report)
         self.record: dict[str, object] = {
             "config_sha256": file_sha256(config),
@@ -59,6 +62,8 @@ class WorkflowProgress:
             "job_index": 0,
         }
         self.phase_started = time.monotonic()
+        if model_training_config is not None:
+            self.record["model_training_config_sha256"] = file_sha256(model_training_config)
         self.last_publish = -float("inf")
 
     def start_job(self, index: int, name: str) -> None:

@@ -68,6 +68,11 @@ dataset_subsetting:  # reference parameters for stage 0 (not read by seepat-work
       report: outputs/extract_val_subset1000.json
 
 report: outputs/workflow_scaled_summary.json
+# Optional training profile, relative to this config directory.
+# null preserves the accepted historical preflights. Niko selects a profile
+# only after reviewing its downloads, hardware needs, and output paths.
+model_training_config: null
+
 decisions:
   - name: validation-decisions
     validation_manifest: outputs/numerical_calibration/guarded_per_video_v3/events_val_calibrated.csv

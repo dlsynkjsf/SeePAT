@@ -45,6 +45,7 @@ class ModelTrainingJob:
     pretrained: bool
     options: dict[str, object]
     model: str = "swin3d_b"
+    readiness_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,7 @@ class WorkflowSettings:
     numerical_calibration_jobs: tuple[NumericalCalibrationJob, ...] = ()
     trace_augmentation_jobs: tuple[TraceAugmentationJob, ...] = ()
     decision_jobs: tuple[DecisionJob, ...] = ()
+    model_training_config: Path | None = None
 
 
 def _require_mapping(value: object, description: str) -> dict[str, Any]:
@@ -108,7 +110,17 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
             )
         )
 
-    raw_training = config.get("model_training")
+    training_config = None
+    training_source = config
+    if config.get("model_training_config") is not None:
+        training_config = path.parent / str(config["model_training_config"])
+        with training_config.open(encoding="utf-8") as stream:
+            training_source = _require_mapping(yaml.safe_load(stream), "Model training profile")
+        if training_source.get("model_training_config") is not None:
+            raise ValueError("Nested model training profiles are not supported")
+        if not training_source.get("model_training"):
+            raise ValueError("Model training profile must contain model_training jobs")
+    raw_training = training_source.get("model_training")
     if raw_training is None:
         raw_training_jobs: list[object] = []
     elif isinstance(raw_training, list):
@@ -145,6 +157,7 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
                 pretrained=pretrained,
                 options={str(key): value for key, value in options.items()},
                 model=model,
+                readiness_dir=Path(training["readiness_dir"]) if training.get("readiness_dir") else None,
             )
         except KeyError as error:
             raise ValueError(
@@ -152,6 +165,11 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
             ) from error
         if not model_training.name:
             raise ValueError("Model training configuration has no name")
+        if model_training.readiness_dir is not None and (
+            model_training.readiness_dir.resolve() == model_training.output_dir.resolve()
+            or options.get("max_train_batches") is not None
+        ):
+            raise ValueError("Experiment readiness must use a separate output and an uncapped training job")
         if model_training.name in model_names:
             raise ValueError(f"Duplicate model training job name: {model_training.name}")
         if model_training.output_dir in model_output_dirs:
@@ -263,6 +281,7 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
         numerical_calibration_jobs=tuple(numerical_calibration_jobs),
         trace_augmentation_jobs=tuple(augmentation_jobs),
         decision_jobs=tuple(decision_jobs),
+        model_training_config=training_config,
     )
 
 
@@ -590,6 +609,13 @@ def run_model_training_job(
             "summary": _read_json(job.output_dir / "run.json"),
         }
 
+    if job.readiness_dir is not None:
+        from seepat.training.readiness import require_readiness
+
+        if progress is not None:
+            progress("verify training readiness", 0, 0, job.name)
+        require_readiness(job)
+
     run_path = job.output_dir / "run.json"
     checkpoint_path = job.output_dir / "checkpoint_last.pt"
     resume_from = None
@@ -664,7 +690,10 @@ def run_workflow(
         + [("model_training", job) for job in settings.model_training_jobs]
         + [("decisions", job) for job in settings.decision_jobs]
     )
-    progress = WorkflowProgress(config_path, settings.report_path, len(tasks))
+    progress = WorkflowProgress(
+        config_path, settings.report_path, len(tasks),
+        model_training_config=settings.model_training_config,
+    )
     try:
         for index, (kind, job) in enumerate(tasks, 1):
             progress.start_job(index, job.name)

@@ -14,7 +14,7 @@ from typing import Any
 import torch
 from torch import nn
 from torch.nn import functional as F
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 
 from seepat.artifacts import atomic_write_json
 from seepat.live_progress import ProgressCallback
@@ -119,8 +119,8 @@ class TrainingOptions:
             raise ValueError("learning_rate must be positive")
         if self.weight_decay < 0:
             raise ValueError("weight_decay must not be negative")
-        if self.class_weighting not in {"balanced", "none"}:
-            raise ValueError("class_weighting must be 'balanced' or 'none'")
+        if self.class_weighting not in {"balanced", "balanced_global", "none"}:
+            raise ValueError("class_weighting must be 'balanced', 'balanced_global', or 'none'")
         batch_limits = (self.max_train_batches, self.max_validation_batches)
         if (batch_limits[0] is None) != (batch_limits[1] is None):
             raise ValueError(
@@ -170,7 +170,23 @@ def _loader(
     device: torch.device,
     shuffle: bool,
     seed: int,
+    balanced_limit: int | None = None,
 ) -> DataLoader[Any]:
+    if balanced_limit is not None:
+        pools = [[index for index, row in enumerate(dataset.rows) if int(row["class_id"]) == label]
+                 for label in (0, 1)]
+        if balanced_limit < 2 or not all(pools):
+            raise ValueError("Balanced readiness sampling requires both classes and at least two events")
+        randomizer = random.Random(seed)
+        for pool in pools:
+            randomizer.shuffle(pool)
+        indices = []
+        for index in range(min(balanced_limit, len(dataset))):
+            label = index % 2
+            if not pools[label]:
+                label = 1 - label
+            indices.append(pools[label].pop())
+        dataset = Subset(dataset, indices)
     generator = torch.Generator()
     generator.manual_seed(seed)
     return DataLoader(
@@ -252,7 +268,7 @@ def _evaluate(
                 enabled=amp_enabled,
             ):
                 logits = _forward_logits(model, videos, batch, device)
-                loss = loss_function(logits, labels)
+                loss = loss_function(logits, labels).mean()
             if not torch.isfinite(loss).item():
                 raise FloatingPointError("Validation loss is not finite")
             batch_size = labels.shape[0]
@@ -395,10 +411,15 @@ def train_model(
         torch.cuda.reset_peak_memory_stats(device)
     class_weights = (
         _balanced_class_weights(train_rows, device)
-        if options.class_weighting == "balanced"
+        if options.class_weighting in {"balanced", "balanced_global"}
         else None
     )
-    loss_function = nn.CrossEntropyLoss(weight=class_weights)
+    # Global Train weights must survive batch size one and gradient accumulation.
+    # Retain the old batch-normalized mode for historical checkpoint replay.
+    loss_function = nn.CrossEntropyLoss(
+        weight=class_weights,
+        reduction="none" if options.class_weighting == "balanced_global" else "mean",
+    )
 
     output_dir.mkdir(parents=True, exist_ok=True)
     history: list[dict[str, object]] = []
@@ -480,6 +501,10 @@ def train_model(
         "optimizer_steps": 0,
         "skipped_optimizer_steps": 0,
         "data": {
+            "preflight_sampling": (
+                "balanced_events" if limited_run and options.class_weighting == "balanced_global"
+                else "original_loader_order"
+            ),
             "train_events": len(train_dataset),
             "validation_events": len(validation_dataset),
             "train_source_groups": len({row["source_group"] for row in train_rows}),
@@ -513,6 +538,8 @@ def train_model(
             device,
             shuffle=False,
             seed=options.seed,
+            balanced_limit=(validation_batches_per_epoch * options.batch_size
+                            if limited_run and options.class_weighting == "balanced_global" else None),
         )
         for epoch in range(start_epoch, options.epochs + 1):
             train_loader = _loader(
@@ -522,6 +549,8 @@ def train_model(
                 device,
                 shuffle=True,
                 seed=options.seed + epoch,
+                balanced_limit=(train_batches_per_epoch * options.batch_size
+                                if limited_run and options.class_weighting == "balanced_global" else None),
             )
             model.train()
             if options.freeze_backbone and hasattr(model, "backbone"):
@@ -556,8 +585,14 @@ def train_model(
                     enabled=amp_enabled,
                 ):
                     logits = _forward_logits(model, videos, batch, device)
-                    batch_loss = loss_function(logits, labels)
-                    backward_loss = batch_loss / options.gradient_accumulation_steps
+                    batch_loss = loss_function(logits, labels).mean()
+                    accumulation_size = options.gradient_accumulation_steps
+                    backward_loss = batch_loss / accumulation_size
+                    if options.class_weighting == "balanced_global":
+                        group_start = ((batch_index - 1) // accumulation_size) * accumulation_size
+                        group_end = min(group_start + accumulation_size, train_batches_per_epoch)
+                        group_samples = min(len(train_dataset), group_end * options.batch_size) - group_start * options.batch_size
+                        backward_loss = batch_loss * labels.numel() / group_samples
                 if not torch.isfinite(batch_loss).item():
                     raise FloatingPointError("Training loss is not finite")
                 scaler.scale(backward_loss).backward()
@@ -858,7 +893,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--class-weighting",
-        choices=("balanced", "none"),
+        choices=("balanced", "balanced_global", "none"),
         default="balanced",
     )
     args = parser.parse_args()

@@ -111,7 +111,9 @@ def read_live_workflow_progress(config_path: Path) -> dict[str, object]:
 
     settings = load_workflow_settings(config_path)
     record = _read_run_record(live_progress_path(settings.report_path))
-    if not record or record.get("config_sha256") != file_sha256(config_path):
+    profile_hash = file_sha256(settings.model_training_config) if settings.model_training_config else None
+    if (not record or record.get("config_sha256") != file_sha256(config_path)
+            or record.get("model_training_config_sha256") != profile_hash):
         return {
             "status": "unavailable",
             "message": (
