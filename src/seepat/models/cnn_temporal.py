@@ -6,6 +6,7 @@ from pathlib import Path
 
 import torch
 from torch import Tensor, nn
+from torch.nn import functional as F
 from torchvision.models import EfficientNet_V2_S_Weights, efficientnet_v2_s
 
 from seepat.artifacts import atomic_write_json
@@ -144,6 +145,14 @@ class TemporalConvEncoder(nn.Module):
         return self.output_projection(pooled)
 
 
+class MaskedFrameMean(nn.Module):
+    """Parameter-free temporal pooling for the spatial-only control."""
+
+    def forward(self, features: Tensor, frame_mask: Tensor | None = None) -> Tensor:
+        mask = TemporalConvEncoder._validated_mask(features, frame_mask).unsqueeze(-1)
+        return torch.where(mask, features, 0.0).sum(1) / mask.sum(1)
+
+
 class EfficientNetTempCNNEventClassifier(nn.Module):
     """EfficientNetV2-S spatial features followed by a TempCNN event encoder."""
 
@@ -159,6 +168,7 @@ class EfficientNetTempCNNEventClassifier(nn.Module):
         temporal_kernel_size: int = 3,
         dropout: float = 0.2,
         backbone: nn.Module | None = None,
+        temporal: bool = True,
     ) -> None:
         super().__init__()
         if backbone is None:
@@ -176,8 +186,8 @@ class EfficientNetTempCNNEventClassifier(nn.Module):
             layers=temporal_layers,
             kernel_size=temporal_kernel_size,
             dropout=dropout,
-        )
-        self.classifier = nn.Linear(embedding_features, 2)
+        ) if temporal else MaskedFrameMean()
+        self.classifier = nn.Linear(embedding_features if temporal else frame_features, 2)
         self.freeze_backbone = freeze_backbone
         self.register_buffer(
             "pixel_mean",
@@ -225,6 +235,29 @@ class EfficientNetTempCNNEventClassifier(nn.Module):
 
     def forward(self, video: Tensor, frame_mask: Tensor | None = None) -> Tensor:
         return self.classifier(self.extract_features(video, frame_mask))
+
+
+class TempCNNOnlyEventClassifier(nn.Module):
+    """TempCNN over fixed grayscale 16x16 frames; no learned spatial encoder."""
+
+    uses_frame_mask = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.temporal_encoder = TemporalConvEncoder(input_features=256)
+        self.classifier = nn.Linear(256, 2)
+
+    def extract_frame_features(self, video: Tensor) -> Tensor:
+        if video.ndim != 5 or video.shape[1] != 3:
+            raise ValueError("video must have shape B x 3 x T x H x W")
+        grayscale = video[:, 0] * 0.2989 + video[:, 1] * 0.5870 + video[:, 2] * 0.1140
+        batch, frames, height, width = grayscale.shape
+        return F.adaptive_avg_pool2d(
+            grayscale.reshape(batch * frames, 1, height, width), (16, 16)
+        ).reshape(batch, frames, 256)
+
+    def forward(self, video: Tensor, frame_mask: Tensor | None = None) -> Tensor:
+        return self.classifier(self.temporal_encoder(self.extract_frame_features(video), frame_mask))
 
 
 def main() -> None:

@@ -1,0 +1,28 @@
+# Opt-in paper study. Preparation uses saved traces and never decodes raw videos.
+# Full workspace: set workflow_scaled.yaml model_training_config: training_ablations.yaml
+# Transferred study exports: use this profile directly with seepat.workflow.
+report: outputs/workflow_ablations_summary.json
+ablation_study:
+  name: paper-ablations
+  train_manifest: outputs/trace_augmentation/train/events_augmented.csv
+  validation_manifest: outputs/trace_augmentation/val/events_augmented.csv
+  output_dir: outputs/ablation_study/guarded_base_en_v1
+  # User-selected phases: prepare -> calibration -> audit -> readiness -> train -> evaluate
+  phase: prepare
+  folds: 5
+  seed: 20260916
+  device: cuda
+  project_root: .
+  # Run readiness at 1, then set to 2 and rerun separately to check resume.
+  readiness_epochs: 1
+  epochs: 10
+  # H3 requires these three models: 15 fits across five folds.
+  models:
+    - efficientnet_v2_s_only
+    - tempcnn_gray16
+    - efficientnet_v2_s_tempcnn
+  # Swin remains in the existing primary experiment profile. Add it here if
+  # reporting paired fold comparisons too: swin3d_b
+  # Optional evidence ablation must train BOTH variants on the same folds:
+  #   swin3d_b_vild_fusion
+  #   swin3d_b_visual_fusion
