@@ -33,3 +33,12 @@ finite saved model/optimizer state and actual updates. The new globally balanced
 loss preserves minority-class weights with batch-size-one gradient accumulation.
 The default workflow retains the accepted preflights until a training profile
 is selected; new hardware runs have not been performed.
+
+An opt-in ablation study adds EfficientNet-only, TempCNN over fixed grayscale
+frames, and fusion without biological evidence. Source-group folds fit their
+own Train calibration and use official Validation for checkpoint/threshold
+selection. Static geometry and dynamic calibration are compared on matched
+evidence, with coverage and paired fold diagnostics. Evaluation writes readable
+Markdown tables and CSV summaries with fold averages, confusion counts, evidence
+coverage and explicit missing comparisons. Neural experiments and confirmatory
+statistical review remain pending.

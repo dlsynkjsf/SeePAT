@@ -18,7 +18,10 @@ from torch.utils.data import DataLoader, Dataset, Subset
 
 from seepat.artifacts import atomic_write_json
 from seepat.live_progress import ProgressCallback
-from seepat.models.cnn_temporal import EfficientNetTempCNNEventClassifier
+from seepat.models.cnn_temporal import (
+    EfficientNetTempCNNEventClassifier,
+    TempCNNOnlyEventClassifier,
+)
 from seepat.models.fusion import FUSION_MODEL_NAME, HybridFusionEventClassifier
 from seepat.models.swin_baseline import SwinBaseEventClassifier, parameter_counts
 from seepat.training.dataset import MouthEventDataset
@@ -30,16 +33,28 @@ from seepat.training.metrics import (
 SWIN_BASE_MODEL = "swin3d_b"
 CNN_TEMPORAL_MODEL = "efficientnet_v2_s_tempcnn"
 FUSION_MODEL = FUSION_MODEL_NAME
-SUPPORTED_MODELS = (SWIN_BASE_MODEL, CNN_TEMPORAL_MODEL, FUSION_MODEL)
+EFFICIENTNET_MODEL = "efficientnet_v2_s_only"
+TEMPCNN_MODEL = "tempcnn_gray16"
+VISUAL_FUSION_MODEL = "swin3d_b_visual_fusion"
+SUPPORTED_MODELS = (
+    SWIN_BASE_MODEL, CNN_TEMPORAL_MODEL, FUSION_MODEL,
+    EFFICIENTNET_MODEL, TEMPCNN_MODEL, VISUAL_FUSION_MODEL,
+)
 MODEL_CONTRACT_NAMES = {
     SWIN_BASE_MODEL: "torchvision.swin3d_b",
     CNN_TEMPORAL_MODEL: "torchvision.efficientnet_v2_s+tempcnn",
     FUSION_MODEL: "seepat.hybrid_fusion.swin3d_b_tempcnn_evidence",
+    EFFICIENTNET_MODEL: "torchvision.efficientnet_v2_s+masked_mean",
+    TEMPCNN_MODEL: "seepat.tempcnn+fixed_grayscale_16x16",
+    VISUAL_FUSION_MODEL: "seepat.hybrid_fusion.swin3d_b_tempcnn_no_evidence",
 }
 MODEL_TRAINING_VERSIONS = {
     SWIN_BASE_MODEL: "swin-baseline-v1",
     CNN_TEMPORAL_MODEL: "cnn-temporal-v1",
     FUSION_MODEL: "hybrid-fusion-v3",
+    EFFICIENTNET_MODEL: "efficientnet-only-v1",
+    TEMPCNN_MODEL: "tempcnn-gray16-v1",
+    VISUAL_FUSION_MODEL: "visual-fusion-v1",
 }
 # Backward-compatible public name for existing Swin run records and callers.
 TRAINING_VERSION = MODEL_TRAINING_VERSIONS[SWIN_BASE_MODEL]
@@ -69,15 +84,21 @@ def build_event_classifier(
             pretrained=pretrained,
             freeze_backbone=freeze_backbone,
         )
-    if model_name == CNN_TEMPORAL_MODEL:
+    if model_name in {CNN_TEMPORAL_MODEL, EFFICIENTNET_MODEL}:
         return EfficientNetTempCNNEventClassifier(
             pretrained=pretrained,
             freeze_backbone=freeze_backbone,
+            temporal=model_name == CNN_TEMPORAL_MODEL,
         )
-    if model_name == FUSION_MODEL:
+    if model_name == TEMPCNN_MODEL:
+        if pretrained or freeze_backbone:
+            raise ValueError("TempCNN alone has no pretrained backbone; disable pretrained/freeze_backbone")
+        return TempCNNOnlyEventClassifier()
+    if model_name in {FUSION_MODEL, VISUAL_FUSION_MODEL}:
         return HybridFusionEventClassifier(
             pretrained=pretrained,
             freeze_backbone=freeze_backbone,
+            use_evidence=model_name == FUSION_MODEL,
         )
     raise ValueError(f"Unsupported training model: {model_name!r}")
 

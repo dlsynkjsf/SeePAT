@@ -18,12 +18,16 @@ from seepat.pipeline import PIPELINE_VERSION, run_pipeline
 from seepat.preprocessing.augmentation import TraceAugmentationJob, run_trace_augmentation
 from seepat.preprocessing.contract import audit_preprocessing_contract
 from seepat.training.manifest import prepare_training_manifests
+from seepat.training.study import StudyJob, run_study_job
 
 WORKFLOW_VERSION = "local-pipeline-v2"
 SUPPORTED_TRAINING_MODELS = {
     "swin3d_b",
     "efficientnet_v2_s_tempcnn",
     "swin3d_b_vild_fusion",
+    "efficientnet_v2_s_only",
+    "tempcnn_gray16",
+    "swin3d_b_visual_fusion",
 }
 
 
@@ -68,6 +72,7 @@ class WorkflowSettings:
     trace_augmentation_jobs: tuple[TraceAugmentationJob, ...] = ()
     decision_jobs: tuple[DecisionJob, ...] = ()
     model_training_config: Path | None = None
+    study_job: StudyJob | None = None
 
 
 def _require_mapping(value: object, description: str) -> dict[str, Any]:
@@ -118,8 +123,8 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
             training_source = _require_mapping(yaml.safe_load(stream), "Model training profile")
         if training_source.get("model_training_config") is not None:
             raise ValueError("Nested model training profiles are not supported")
-        if not training_source.get("model_training"):
-            raise ValueError("Model training profile must contain model_training jobs")
+        if not (training_source.get("model_training") or training_source.get("ablation_study")):
+            raise ValueError("Model training profile must contain model_training jobs or an ablation_study")
     raw_training = training_source.get("model_training")
     if raw_training is None:
         raw_training_jobs: list[object] = []
@@ -271,7 +276,17 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
         ):
             raise ValueError("Decision jobs require unique names/outputs and positive batch size")
         decision_jobs.append(decision)
-    if not (jobs or augmentation_jobs or numerical_calibration_jobs or model_training_jobs or decision_jobs):
+    study_job = None
+    if training_source.get("ablation_study") is not None:
+        item = dict(_require_mapping(training_source["ablation_study"], "Ablation study"))
+        for key in ("train_manifest", "validation_manifest", "output_dir", "project_root"):
+            if key in item:
+                item[key] = Path(item[key])
+        if "models" in item:
+            item["models"] = tuple(item["models"])
+        study_job = StudyJob(**item)
+        study_job.validate()
+    if not (jobs or augmentation_jobs or numerical_calibration_jobs or model_training_jobs or decision_jobs or study_job):
         raise ValueError("Workflow configuration must contain at least one job")
     report_path = Path(str(config.get("report", "outputs/workflow_summary.json")))
     return WorkflowSettings(
@@ -282,6 +297,7 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
         trace_augmentation_jobs=tuple(augmentation_jobs),
         decision_jobs=tuple(decision_jobs),
         model_training_config=training_config,
+        study_job=study_job,
     )
 
 
@@ -688,6 +704,7 @@ def run_workflow(
         + [("trace_augmentation", job) for job in settings.trace_augmentation_jobs]
         + [("numerical_calibration", job) for job in settings.numerical_calibration_jobs]
         + [("model_training", job) for job in settings.model_training_jobs]
+        + ([("ablation_study", settings.study_job)] if settings.study_job else [])
         + [("decisions", job) for job in settings.decision_jobs]
     )
     progress = WorkflowProgress(
@@ -705,6 +722,8 @@ def run_workflow(
                 result = run_numerical_calibration_job(job, progress=progress)
             elif kind == "decisions":
                 result = run_decision_job(job, progress=progress)
+            elif kind == "ablation_study":
+                result = run_study_job(job, progress=progress)
             else:
                 progress("verify or resume model job", 0, 0, "")
                 result = run_model_training_job(job, progress=progress)

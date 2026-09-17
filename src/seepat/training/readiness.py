@@ -164,7 +164,15 @@ def main() -> None:
     parser.add_argument("--config", type=Path, default=Path("configs/training_experiments.yaml"))
     parser.add_argument("--inputs-only", action="store_true", help="Check manifests and clip paths; no checkpoint loading")
     args = parser.parse_args()
-    jobs = load_workflow_settings(args.config).model_training_jobs
+    settings = load_workflow_settings(args.config)
+    jobs = list(settings.model_training_jobs)
+    if settings.study_job is not None:
+        from seepat.training.study import load_study, model_job
+
+        study = settings.study_job
+        folds = load_study(study)["folds"]
+        jobs.extend(model_job(study, fold, model, readiness=False)
+                    for fold in folds for model in study.models)
     results = []
     for job in jobs:
         try:

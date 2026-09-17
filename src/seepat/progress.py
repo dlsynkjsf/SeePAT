@@ -218,8 +218,16 @@ def read_workflow_progress(config_path: Path) -> dict[str, object]:
 
     decisions = [{"name": job.name, "stages": decision_stage_status(job)} for job in settings.decision_jobs]
     current_stages += sum(status == "current" for row in decisions for status in row["stages"].values())
+    study = None
+    if settings.study_job is not None:
+        from seepat.training.study import study_phase_is_current
+
+        current = study_phase_is_current(settings.study_job)
+        current_stages += int(current)
+        study = {"name": settings.study_job.name, "phase": settings.study_job.phase,
+                 "status": "current" if current else "pending_or_stale"}
     total_stages = (2 * len(settings.jobs) + len(settings.model_training_jobs)
-                    + len(evidence_stages) + 3 * len(decisions))
+                    + len(evidence_stages) + 3 * len(decisions) + int(study is not None))
     return {
         "workflow_config": config_path.as_posix(),
         "stages_current": current_stages,
@@ -229,6 +237,7 @@ def read_workflow_progress(config_path: Path) -> dict[str, object]:
         "model_training": model_training,
         "evidence_stages": evidence_stages,
         "decisions": decisions,
+        "ablation_study": study,
     }
 
 
@@ -259,6 +268,8 @@ def format_workflow_progress(progress: dict[str, object]) -> str:
         f"[{timestamp}] workflow stages="
         f"{progress['stages_current']}/{progress['stages_total']} current"
         f"{model_text}{evidence_text}"
+        + (f" | study={progress['ablation_study']['phase']}:{progress['ablation_study']['status']}"
+           if progress.get("ablation_study") else "")
     )
 
 

@@ -103,6 +103,7 @@ class HybridFusionEventClassifier(nn.Module):
         fusion_dimension: int = 256,
         fusion_heads: int = 8,
         dropout: float = 0.2,
+        use_evidence: bool = True,
     ) -> None:
         super().__init__()
         if evidence_features < 1 or evidence_hidden < 1:
@@ -126,6 +127,8 @@ class HybridFusionEventClassifier(nn.Module):
         self.backbone = swin_backbone
         self.frame_backbone = frame_backbone
         self.evidence_feature_count = evidence_features
+        self.uses_evidence_features = use_evidence
+        self.evidence_fields = FUSION_EVIDENCE_FIELDS if use_evidence else ()
         self.temporal_encoder = TemporalConvEncoder(
             input_features=frame_feature_count,
             temporal_channels=temporal_channels,
@@ -143,7 +146,7 @@ class HybridFusionEventClassifier(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(evidence_hidden, fusion_dimension),
             nn.GELU(),
-        )
+        ) if use_evidence else None
         self.fusion = CrossModalFusionBlock(fusion_dimension, fusion_heads, dropout)
         self.classifier = nn.Linear(fusion_dimension, 2)
 
@@ -232,18 +235,22 @@ class HybridFusionEventClassifier(nn.Module):
         feature_mask: Tensor | None = None,
     ) -> dict[str, Tensor]:
         """Return the projected Swin, CNN-temporal and evidence tokens."""
-        if features is None or feature_mask is None:
-            raise ValueError("Fusion requires explicit evidence features and per-feature masks")
-        if features.shape[0] != video.shape[0]:
-            raise ValueError("Evidence and video batch sizes must match")
-        evidence_token = self._evidence_embedding(features, feature_mask)
+        evidence_token = None
+        if self.uses_evidence_features:
+            if features is None or feature_mask is None:
+                raise ValueError("Fusion requires explicit evidence features and per-feature masks")
+            if features.shape[0] != video.shape[0]:
+                raise ValueError("Evidence and video batch sizes must match")
+            evidence_token = self._evidence_embedding(features, feature_mask)
         swin_token = self.swin_projection(self._swin_features(video))
         temporal_token = self.temporal_projection(self._temporal_features(video, frame_mask))
-        return {
+        tokens = {
             "swin": swin_token,
             "temporal": temporal_token,
-            "evidence": evidence_token,
         }
+        if evidence_token is not None:
+            tokens["evidence"] = evidence_token
+        return tokens
 
     def forward(
         self,
@@ -253,10 +260,7 @@ class HybridFusionEventClassifier(nn.Module):
         feature_mask: Tensor | None = None,
     ) -> Tensor:
         tokens = self.extract_modality_tokens(video, frame_mask, features, feature_mask)
-        stacked = torch.stack(
-            [tokens["swin"], tokens["temporal"], tokens["evidence"]],
-            dim=1,
-        )
+        stacked = torch.stack(list(tokens.values()), dim=1)
         fused = self.fusion(stacked)
         return self.classifier(fused)
 
