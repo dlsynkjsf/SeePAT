@@ -20,12 +20,17 @@ def _replace_with_retry(temporary: Path, target: Path) -> None:
             sleep(0.05 * 2**attempt)
 
 
-def atomic_write_json(path: Path, value: object) -> None:
-    """Write JSON through a sibling temporary file, then replace atomically."""
+def atomic_write_text(path: Path, value: str) -> None:
+    """Write UTF-8 text through a sibling temporary file, allowing reader locks."""
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+    temporary.write_text(value, encoding="utf-8")
     _replace_with_retry(temporary, path)
+
+
+def atomic_write_json(path: Path, value: object) -> None:
+    """Write JSON through a sibling temporary file, then replace atomically."""
+    atomic_write_text(path, json.dumps(value, indent=2) + "\n")
 
 
 def atomic_write_gzip_json(path: Path, value: object) -> None:

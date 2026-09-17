@@ -228,45 +228,24 @@ def paired_statistics(first: list[float], second: list[float]) -> dict:
     observed = abs(float(np.sum(np.sign(nonzero) * ranks)))
     permutations = [abs(float(np.dot(signs, ranks))) for signs in product((-1, 1), repeat=len(nonzero))]
     p_value = sum(value >= observed for value in permutations) / len(permutations)
-    varying = float(np.std(differences)) > 0
-    normality = float(stats.shapiro(differences).pvalue) if len(first) >= 3 and varying else None
-    t_p = float(stats.ttest_rel(first, second).pvalue) if varying else None
+    varying = bool(np.ptp(differences) > 0)
+    normality = stats.shapiro(differences) if len(first) >= 3 and varying else None
+    t_result = stats.ttest_rel(first, second) if varying else None
     return {"pairs": len(first), "differences_first_minus_second": differences.tolist(),
-            "mean_difference": float(np.mean(differences)), "shapiro_p": normality,
-            "paired_t_p": t_p, "exact_two_sided_signed_rank_p": p_value,
+            "nonzero_pairs": len(nonzero), "mean_difference": float(np.mean(differences)),
+            "shapiro_statistic": float(normality.statistic) if normality is not None else None,
+            "shapiro_p": float(normality.pvalue) if normality is not None else None,
+            "paired_t_statistic": float(t_result.statistic) if t_result is not None else None,
+            "paired_t_p": float(t_result.pvalue) if t_result is not None else None,
+            "signed_rank_statistic": float((np.sum(ranks) - observed) / 2),
+            "exact_two_sided_signed_rank_p": p_value,
             "minimum_two_sided_p": min(1., 2 / (2 ** len(nonzero))),
             "interpretation": "Descriptive diagnostics only; overlapping training folds are dependent. "
             "At five nonzero pairs the minimum two-sided signed-rank p is 0.0625. "
             "No automatic significance claim or post-hoc test switching."}
 
 
-def write_comparison(prefix: Path, results: list[dict]) -> None:
-    by_model = {}
-    rows = []
-    for result in results:
-        model, fold = result["model"], result["fold"]
-        if fold in by_model.setdefault(model, {}):
-            raise ValueError("Duplicate model/fold result")
-        by_model[model][fold] = result["video_metrics"]
-        rows.append({"model": model, "fold": fold, **result["video_metrics"]})
-    comparisons = []
-    # Prespecified comparisons, avoiding an automatic all-pairs fishing exercise.
-    for first, second, metric in (
-        ("efficientnet_v2_s_tempcnn", "efficientnet_v2_s_only", "f1"),
-        ("efficientnet_v2_s_tempcnn", "tempcnn_gray16", "f1"),
-        ("swin3d_b_vild_fusion", "swin3d_b_visual_fusion", "f1"),
-        ("geometry_dynamic", "geometry_static", "false_positive_rate"),
-        ("geometry_dynamic", "geometry_static", "recall"),
-    ):
-        if first not in by_model or second not in by_model:
-            continue
-        folds = sorted(by_model[first])
-        if set(folds) != set(by_model[second]):
-            raise ValueError("Paired comparisons require identical fold inventories")
-        comparisons.append({"first": first, "second": second, "metric": metric,
-                            **paired_statistics([by_model[first][f][metric] for f in folds],
-                                                [by_model[second][f][metric] for f in folds])})
-    atomic_write_csv(prefix.with_suffix(".csv"), rows)
-    atomic_write_json(prefix.with_suffix(".json"), {"version": EVALUATION_VERSION,
-                      "fold_results": results, "paired_comparisons": comparisons,
-                      "multiple_comparisons": "No confirmatory significance decision; analysis policy needs adviser review"})
+def write_comparison(prefix: Path, results: list[dict], **kwargs) -> list[Path]:
+    from seepat.training.study_reporting import write_report
+
+    return write_report(prefix, results, **kwargs)

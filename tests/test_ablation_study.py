@@ -84,6 +84,19 @@ def test_prepare_refits_population_per_fold_resumes_and_detects_tampering(tmp_pa
     result = run_study_job(replace(job, phase="calibration"))
     assert len(result["results"]) == 4
     assert study_phase_is_current(replace(job, phase="calibration"))
+    report = job.output_dir / "calibration_comparison.md"
+    assert "SeePAT study results" in report.read_text()
+    original_report = report.read_bytes()
+    report.write_text("edited result table")
+    assert not study_phase_is_current(replace(job, phase="calibration"))
+    run_study_job(replace(job, phase="calibration"))
+    assert report.read_bytes() == original_report
+    assert study_phase_is_current(replace(job, phase="calibration"))
+    complete_path = job.output_dir / "calibration_complete.json"
+    complete = json.loads(complete_path.read_text())
+    complete.pop("report_version")
+    atomic_write_json(complete_path, complete)
+    assert not study_phase_is_current(replace(job, phase="calibration"))
     # A transferred export is sufficient; original traces/inputs are not reread.
     job.train_manifest.unlink()
     job.validation_manifest.unlink()

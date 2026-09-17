@@ -253,8 +253,14 @@ def run_study_job(job: StudyJob, progress: ProgressCallback | None = None) -> di
                 result = evaluate_model(job, fold, training, model_progress)
             results.append(result)
     if job.phase in {"evaluate", "calibration"}:
-        write_comparison(job.output_dir / f"{job.phase}_comparison", results)
-        files = [job.output_dir / f"{job.phase}_comparison.{ext}" for ext in ("csv", "json")]
+        from seepat.training.study_reporting import REPORT_VERSION
+
+        if progress:
+            progress("write study results report", 0, 1, job.phase)
+        files = write_comparison(
+            job.output_dir / f"{job.phase}_comparison", results, expected_folds=job.folds,
+            expected_models=("geometry_static", "geometry_dynamic") if job.phase == "calibration" else job.models,
+        )
         for result in results:
             files.extend(Path(path) for path in result.get("artifacts", {}))
             if job.phase == "evaluate":
@@ -265,10 +271,13 @@ def run_study_job(job: StudyJob, progress: ProgressCallback | None = None) -> di
             else:
                 files.append(job.output_dir / f"fold_{result['fold']}" / "calibration_comparison.json")
         atomic_write_json(job.output_dir / f"{job.phase}_complete.json", {
+            "report_version": REPORT_VERSION,
             "settings": json.loads(json.dumps(asdict(job), default=str)),
             "study_sha256": file_sha256(job.output_dir / "study.json"),
             "artifacts": {p.as_posix(): file_sha256(p) for p in files},
         })
+        if progress:
+            progress("write study results report", 1, 1, job.phase)
     return {"name": job.name, "action": job.phase, "results": results}
 
 
@@ -290,8 +299,13 @@ def study_phase_is_current(job: StudyJob) -> bool:
                 for model in job.models:
                     audit_inputs(model_job(job, fold, model, readiness=False))
             return True
+        from seepat.training.study_reporting import REPORT_VERSION, report_paths
+
         complete = _read(job.output_dir / f"{job.phase}_complete.json")
-        return (complete["settings"] == json.loads(json.dumps(asdict(job), default=str))
+        required = report_paths(job.output_dir / f"{job.phase}_comparison")
+        return (complete.get("report_version") == REPORT_VERSION
+                and all(path.as_posix() in complete["artifacts"] for path in required)
+                and complete["settings"] == json.loads(json.dumps(asdict(job), default=str))
                 and complete["study_sha256"] == file_sha256(job.output_dir / "study.json")
                 and all(file_sha256(Path(p)) == digest for p, digest in complete["artifacts"].items()))
     except (OSError, ValueError, KeyError, TypeError):

@@ -38,5 +38,7 @@ An opt-in ablation study adds EfficientNet-only, TempCNN over fixed grayscale
 frames, and fusion without biological evidence. Source-group folds fit their
 own Train calibration and use official Validation for checkpoint/threshold
 selection. Static geometry and dynamic calibration are compared on matched
-evidence, with coverage and paired fold diagnostics. These paths are tested;
-the real study and confirmatory statistical review remain pending.
+evidence, with coverage and paired fold diagnostics. Evaluation writes readable
+Markdown tables and CSV summaries with fold averages, confusion counts, evidence
+coverage and explicit missing comparisons. Neural experiments and confirmatory
+statistical review remain pending.
