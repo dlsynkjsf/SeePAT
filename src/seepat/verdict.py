@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,6 +42,7 @@ from seepat.training.dataset import MouthEventDataset
 from seepat.training.metrics import (
     aggregate_video_probabilities,
     binary_classification_metrics,
+    choose_balanced_accuracy_threshold,
 )
 from seepat.training.train import FUSION_MODEL, build_event_classifier, training_version_for_model
 
@@ -68,53 +68,8 @@ def choose_threshold(
     labels: list[int],
     probabilities: list[float],
 ) -> dict[str, object]:
-    """Pick the threshold with the best balanced accuracy.
-
-    Balanced accuracy is ``(recall + specificity) / 2``, which is insensitive
-    to class imbalance. Ties prefer the lower threshold (higher recall), and
-    both classes must be present.
-    """
-    if len(labels) != len(probabilities) or not labels:
-        raise ValueError("labels and probabilities must have the same non-zero length")
-    if any(label not in {0, 1} for label in labels):
-        raise ValueError("binary labels must be 0 or 1")
-    if any(not math.isfinite(p) or not 0 <= p <= 1 for p in probabilities):
-        raise ValueError("probabilities must be finite values between 0 and 1")
-    positives = sum(labels)
-    negatives = len(labels) - positives
-    if positives == 0 or negatives == 0:
-        raise ValueError("Threshold selection requires both classes in the data")
-
-    grouped: dict[float, list[int]] = {}
-    for label, probability in zip(labels, probabilities, strict=True):
-        if label not in {0, 1}:
-            raise ValueError("binary labels must be 0 or 1")
-        grouped.setdefault(probability, []).append(label)
-
-    true_positives = 0
-    false_positives = 0
-    grouped.setdefault(0.0, [])
-    best_threshold = 0.0
-    best_score = -1
-    for probability in sorted(grouped, reverse=True):
-        for label in grouped[probability]:
-            if label == 1:
-                true_positives += 1
-            else:
-                false_positives += 1
-        # Integer comparison avoids floating-point tie drift. Descending scan
-        # plus >= implements the documented preference for the lowest threshold.
-        score = true_positives * negatives + (negatives - false_positives) * positives
-        if score >= best_score:
-            best_score = score
-            best_threshold = probability
-    return {
-        "threshold": best_threshold,
-        "balanced_accuracy": best_score / (2 * positives * negatives),
-        "samples": len(labels),
-        "positives": positives,
-        "negatives": negatives,
-    }
+    """Backward-compatible public threshold helper."""
+    return dict(choose_balanced_accuracy_threshold(labels, probabilities))
 
 
 def load_evaluation_model(

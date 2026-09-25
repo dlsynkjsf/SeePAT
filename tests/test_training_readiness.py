@@ -50,6 +50,33 @@ def test_profiles_share_experiment_settings_and_preserve_historical_outputs():
         assert not ({preflight.output_dir, experiment.output_dir} & historical_paths)
 
 
+def test_fusion_tuning_profiles_freeze_three_candidates():
+    readiness = load_workflow_settings(ROOT / "configs/fusion_tuning_readiness.yaml")
+    experiments = load_workflow_settings(ROOT / "configs/fusion_tuning.yaml")
+    decisions = load_workflow_settings(ROOT / "configs/fusion_tuning_validation.yaml")
+    assert len(readiness.model_training_jobs) == len(experiments.model_training_jobs) == 3
+    assert len(decisions.decision_jobs) == 3
+    assert [TrainingOptions(**job.options).positive_class_weight_ratio
+            for job in experiments.model_training_jobs] == [None, 20.0, 10.0]
+    for preflight, experiment in zip(
+        readiness.model_training_jobs,
+        experiments.model_training_jobs,
+        strict=True,
+    ):
+        left = TrainingOptions(**preflight.options)
+        right = TrainingOptions(**experiment.options)
+        assert left.selection_metric == right.selection_metric == (
+            "validation_video_balanced_accuracy"
+        )
+        assert replace(
+            left,
+            epochs=10,
+            max_train_batches=None,
+            max_validation_batches=None,
+        ) == right
+        assert experiment.readiness_dir == preflight.output_dir
+
+
 def test_profile_selection_and_live_tracker_notice_profile_changes(tmp_path):
     profile = tmp_path / "training.yaml"
     profile.write_text((ROOT / "configs/training_readiness.yaml").read_text(), encoding="utf-8")
@@ -90,6 +117,7 @@ def _job_and_inputs(tmp_path):
         atomic_write_csv(paths[split], rows)
     options = TrainingOptions(epochs=2, batch_size=1, sequence_length=1, image_size=2,
                               amp=False, class_weighting="balanced_global", learning_rate=0.01,
+                              selection_metric="validation_video_balanced_accuracy",
                               max_train_batches=4, max_validation_batches=4)
     job = ModelTrainingJob("readiness", paths["train"], paths["val"], tmp_path / "ready",
                            tmp_path, "cpu", True, asdict(options))

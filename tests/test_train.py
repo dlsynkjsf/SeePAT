@@ -161,6 +161,49 @@ def test_global_weighting_accumulation_matches_full_batch_with_short_tail(tmp_pa
         torch.testing.assert_close(states[0][key]["exp_avg"], states[1][key]["exp_avg"], atol=1e-7, rtol=1e-6)
 
 
+def test_bounded_fusion_tuning_weight_and_selection_contract(tmp_path, capsys):
+    training = _imbalanced_dataset()
+    weights = train_module._balanced_class_weights(
+        training.rows,
+        torch.device("cpu"),
+        positive_ratio=10,
+    )
+    assert float(weights[1] / weights[0]) == pytest.approx(10)
+    assert float((3 * weights[0] + weights[1]) / 4) == pytest.approx(1)
+
+    options = TrainingOptions(
+        epochs=1,
+        batch_size=2,
+        learning_rate=0.1,
+        weight_decay=0,
+        amp=False,
+        class_weighting="balanced_global",
+        positive_class_weight_ratio=10,
+        selection_metric=train_module.VIDEO_BALANCED_ACCURACY_SELECTION,
+    )
+    report = train_model(
+        TinyVideoClassifier(),
+        training,
+        TinyEventDataset("val"),
+        tmp_path,
+        options,
+        torch.device("cpu"),
+        {"model": "tiny"},
+    )
+    history = json.loads((tmp_path / "history.json").read_text())
+    checkpoint = torch.load(tmp_path / "checkpoint_best.pt", weights_only=False)
+    selection = history[0]["validation"]["selection"]
+    selected_metrics = history[0]["validation"]["videos_at_selection_threshold"]
+    assert selection["metric"] == train_module.VIDEO_BALANCED_ACCURACY_SELECTION
+    assert selection["value"] == pytest.approx(
+        (selected_metrics["recall"] + selected_metrics["specificity"]) / 2
+    )
+    assert checkpoint["selection_metric"] == train_module.VIDEO_BALANCED_ACCURACY_SELECTION
+    assert report["best_selection_value"] == selection["value"]
+    terminal = capsys.readouterr().out
+    assert "balanced accuracy" in terminal and "TRAINING COMPLETE" in terminal
+
+
 def test_model_contracts_distinguish_swin_and_cnn_temporal() -> None:
     assert model_contract_name(SWIN_BASE_MODEL) == "torchvision.swin3d_b"
     assert model_contract_name(CNN_TEMPORAL_MODEL).endswith("+tempcnn")
@@ -178,6 +221,9 @@ def test_preflight_batch_limits_must_be_paired_and_positive() -> None:
 
     with pytest.raises(ValueError, match="must be positive"):
         TrainingOptions(max_train_batches=0, max_validation_batches=1).validate()
+
+    with pytest.raises(ValueError, match="requires balanced_global"):
+        TrainingOptions(positive_class_weight_ratio=10).validate()
 
 
 @pytest.mark.parametrize("overflow_batches", [1, 2])

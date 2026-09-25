@@ -28,7 +28,13 @@ def format_live_progress(record: dict[str, object]) -> str:
     if record.get("status") == "unavailable":
         return str(record["message"])
     done, total = int(record.get("finished", 0)), int(record.get("total", 0))
-    count = f"{done}/{total} ({done / total:.1%})" if total else "count pending"
+    if total:
+        ratio = min(1.0, done / total)
+        width = 20
+        bar = "#" * round(ratio * width) + "-" * (width - round(ratio * width))
+        count = f"[{bar}] {done}/{total} ({ratio:.1%})"
+    else:
+        count = "[--------------------] count pending"
     age = max(0, time.time() - float(record.get("updated_at", time.time())))
     lines = [
         (
@@ -36,9 +42,12 @@ def format_live_progress(record: dict[str, object]) -> str:
             f"| {record.get('job', '')}"
         ),
         (
-            f"  {record.get('phase', 'starting')} | {count} "
-            f"| phase elapsed {duration_text(record.get('elapsed_seconds'))} "
-            f"| phase ETA {duration_text(record.get('eta_seconds'))}"
+            f"  Phase: {record.get('phase', 'starting')}"
+        ),
+        f"  Progress: {count}",
+        (
+            f"  Time: elapsed {duration_text(record.get('elapsed_seconds'))} "
+            f"| ETA {duration_text(record.get('eta_seconds'))}"
         ),
     ]
     if record.get("current_item"):

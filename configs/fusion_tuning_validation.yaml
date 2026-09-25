@@ -1,0 +1,23 @@
+# Validation thresholds/verdicts for the three frozen fusion tuning candidates.
+# This runs only after all three full fits complete.
+report: outputs/workflow_fusion_tuning_validation_summary.json
+
+decisions:
+  - &decision
+    name: fusion-auto-balanced-validation
+    validation_manifest: outputs/numerical_calibration/guarded_per_video_v3/events_val_calibrated.csv
+    source_manifest: data/manifests/val_subset1000.csv
+    checkpoint: outputs/training/fusion_tuning_v1/experiments/auto_balanced/checkpoint_best.pt
+    output_dir: outputs/decisions/fusion_tuning_v1/auto_balanced
+    device: cuda
+    batch_size: 1
+
+  - <<: *decision
+    name: fusion-ratio20-validation
+    checkpoint: outputs/training/fusion_tuning_v1/experiments/ratio20/checkpoint_best.pt
+    output_dir: outputs/decisions/fusion_tuning_v1/ratio20
+
+  - <<: *decision
+    name: fusion-ratio10-validation
+    checkpoint: outputs/training/fusion_tuning_v1/experiments/ratio10/checkpoint_best.pt
+    output_dir: outputs/decisions/fusion_tuning_v1/ratio10

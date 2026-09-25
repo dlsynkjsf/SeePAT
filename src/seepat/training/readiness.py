@@ -75,7 +75,7 @@ def check_readiness(job: ModelTrainingJob) -> dict[str, object]:
     """Inspect a completed, separately resumed preflight; never launch training."""
     import torch
 
-    from seepat.training.train import TrainingOptions
+    from seepat.training.train import VIDEO_BALANCED_ACCURACY_SELECTION, TrainingOptions
     from seepat.workflow import _model_training_configuration_matches
 
     directory = job.readiness_dir or job.output_dir
@@ -116,6 +116,16 @@ def check_readiness(job: ModelTrainingJob) -> dict[str, object]:
                 if (counts["true_positive"] + counts["false_negative"] == 0
                         or counts["true_negative"] + counts["false_positive"] == 0):
                     raise ValueError("Readiness must exercise both event classes in each split and epoch")
+            if options.selection_metric == VIDEO_BALANCED_ACCURACY_SELECTION:
+                selection = epoch["validation"].get("selection", {})
+                if (
+                    selection.get("metric") != VIDEO_BALANCED_ACCURACY_SELECTION
+                    or selection.get("positives", 0) < 1
+                    or selection.get("negatives", 0) < 1
+                ):
+                    raise ValueError(
+                        "Readiness must exercise both video classes for balanced-accuracy selection"
+                    )
         updates = sum(row["optimizer_steps"] for row in history)
         if run.get("global_step") != updates or history[-1].get("global_step") != updates:
             raise ValueError("Readiness update counts disagree")
@@ -135,6 +145,14 @@ def check_readiness(job: ModelTrainingJob) -> dict[str, object]:
             raise ValueError("Readiness model or optimizer contains non-finite values")
         if not (directory / "checkpoint_best.pt").is_file():
             raise ValueError("Readiness did not save its selected checkpoint")
+        selected = torch.load(
+            directory / "checkpoint_best.pt",
+            map_location="cpu",
+            weights_only=False,
+            mmap=True,
+        )
+        if selected.get("selection_metric") != options.selection_metric:
+            raise ValueError("Readiness selected checkpoint uses the wrong metric")
         result.update(status="passed", optimizer_updates=updates, epochs=len(history),
                       environment=run["environment"], peak_cuda_memory_bytes=run["peak_cuda_memory_bytes"],
                       last_invocation_seconds=run["elapsed_seconds"],

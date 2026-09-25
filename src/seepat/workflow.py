@@ -523,6 +523,7 @@ def _model_training_configuration_matches(
     from seepat.training.train import (
         FUSION_MODEL,
         SWIN_BASE_MODEL,
+        VIDEO_F1_SELECTION,
         model_contract_name,
         training_version_for_model,
     )
@@ -539,6 +540,8 @@ def _model_training_configuration_matches(
             _require_mapping(run_record.get("options"), "Recorded training options")
         )
         expected_options = asdict(options)
+        recorded_options.setdefault("positive_class_weight_ratio", None)
+        recorded_options.setdefault("selection_metric", VIDEO_F1_SELECTION)
         recorded_options.pop("epochs", None)
         expected_options.pop("epochs")
         if job.device != "auto" and run_record.get("device") != job.device:
@@ -737,6 +740,30 @@ def run_workflow(
     return report
 
 
+def format_workflow_summary(report: dict[str, object], report_path: Path) -> str:
+    """Compact terminal summary; JSON remains the authoritative report."""
+    lines = ["", "#" * 72, "WORKFLOW COMPLETE"]
+    for row in report.get("model_training", []):
+        summary = row.get("summary", {})
+        metric = summary.get("selection_metric", "validation_video_f1")
+        value = summary.get(
+            "best_selection_value",
+            summary.get("best_validation_video_f1"),
+        )
+        score = f"{float(value):.2%}" if value is not None else "n/a"
+        lines.append(
+            f"  {row['name']:<34} {row['action']!s:<8} "
+            f"best epoch {summary.get('best_epoch', 'n/a')}  |  {metric} {score}"
+        )
+    for row in report.get("decisions", []):
+        current = sum(action in {"ran", "skipped"} for action in row.get("stages", {}).values())
+        lines.append(
+            f"  {row['name']:<34} {row['action']!s:<8} decisions {current}/3 complete"
+        )
+    lines.extend((f"Report: {report_path}", "#" * 72))
+    return "\n".join(lines)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m seepat.workflow")
     parser.add_argument("--config", type=Path, required=True)
@@ -751,7 +778,12 @@ def main() -> None:
     if args.json:
         print(json.dumps(report, indent=2))
     else:
-        print(f"Workflow complete. Report: {load_workflow_settings(args.config).report_path}")
+        print(
+            format_workflow_summary(
+                report,
+                load_workflow_settings(args.config).report_path,
+            )
+        )
 
 
 if __name__ == "__main__":

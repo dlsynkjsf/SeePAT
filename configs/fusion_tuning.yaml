@@ -1,0 +1,49 @@
+# Frozen three-candidate full-fusion tuning study. AV++ Train/Validation only.
+# Winner: highest Validation video balanced accuracy; exact ties use lower FPR.
+report: outputs/workflow_fusion_tuning_summary.json
+
+model_training:
+  - &candidate
+    name: fusion-auto-balanced
+    model: swin3d_b_vild_fusion
+    train_manifest: &train outputs/numerical_calibration/guarded_per_video_v3/events_train_calibrated.csv
+    validation_manifest: &val outputs/numerical_calibration/guarded_per_video_v3/events_val_calibrated.csv
+    output_dir: outputs/training/fusion_tuning_v1/experiments/auto_balanced
+    readiness_dir: outputs/training/fusion_tuning_v1/readiness/auto_balanced
+    project_root: .
+    device: cuda
+    pretrained: true
+    options: &options
+      epochs: 10
+      batch_size: 1
+      workers: 0
+      learning_rate: 0.0001
+      weight_decay: 0.01
+      gradient_accumulation_steps: 4
+      sequence_length: 16
+      image_size: 224
+      seed: 20260916
+      amp: false
+      freeze_backbone: true
+      class_weighting: balanced_global
+      positive_class_weight_ratio: null
+      selection_metric: validation_video_balanced_accuracy
+      early_stopping_patience: 3
+      max_train_batches: null
+      max_validation_batches: null
+
+  - <<: *candidate
+    name: fusion-ratio20
+    output_dir: outputs/training/fusion_tuning_v1/experiments/ratio20
+    readiness_dir: outputs/training/fusion_tuning_v1/readiness/ratio20
+    options:
+      <<: *options
+      positive_class_weight_ratio: 20.0
+
+  - <<: *candidate
+    name: fusion-ratio10
+    output_dir: outputs/training/fusion_tuning_v1/experiments/ratio10
+    readiness_dir: outputs/training/fusion_tuning_v1/readiness/ratio10
+    options:
+      <<: *options
+      positive_class_weight_ratio: 10.0
