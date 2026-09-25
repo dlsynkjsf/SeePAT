@@ -1,0 +1,23 @@
+# AV++ Validation threshold selection for the three completed fixed-split baselines.
+# This scores Validation only. It does not train models or access external data.
+report: outputs/workflow_fixed_split_validation_summary.json
+
+decisions:
+  - &decision
+    name: fixed-split-swin-validation
+    validation_manifest: outputs/numerical_calibration/guarded_per_video_v3/events_val_calibrated.csv
+    source_manifest: data/manifests/val_subset1000.csv
+    checkpoint: outputs/training/experiments_guarded_base_en_v1/swin/checkpoint_best.pt
+    output_dir: outputs/decisions/fixed_split_swin
+    device: cuda
+    batch_size: 1
+
+  - <<: *decision
+    name: fixed-split-cnn-temporal-validation
+    checkpoint: outputs/training/experiments_guarded_base_en_v1/cnn_temporal/checkpoint_best.pt
+    output_dir: outputs/decisions/fixed_split_cnn_temporal
+
+  - <<: *decision
+    name: fixed-split-fusion-validation
+    checkpoint: outputs/training/experiments_guarded_base_en_v1/fusion/checkpoint_best.pt
+    output_dir: outputs/decisions/fixed_split_fusion

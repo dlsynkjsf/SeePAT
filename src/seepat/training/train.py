@@ -28,6 +28,7 @@ from seepat.training.dataset import MouthEventDataset
 from seepat.training.metrics import (
     aggregate_video_probabilities,
     binary_classification_metrics,
+    choose_balanced_accuracy_threshold,
 )
 
 SWIN_BASE_MODEL = "swin3d_b"
@@ -58,6 +59,8 @@ MODEL_TRAINING_VERSIONS = {
 }
 # Backward-compatible public name for existing Swin run records and callers.
 TRAINING_VERSION = MODEL_TRAINING_VERSIONS[SWIN_BASE_MODEL]
+VIDEO_F1_SELECTION = "validation_video_f1"
+VIDEO_BALANCED_ACCURACY_SELECTION = "validation_video_balanced_accuracy"
 
 
 def model_contract_name(model_name: str) -> str:
@@ -117,6 +120,8 @@ class TrainingOptions:
     amp: bool = True
     freeze_backbone: bool = False
     class_weighting: str = "balanced"
+    positive_class_weight_ratio: float | None = None
+    selection_metric: str = VIDEO_F1_SELECTION
     early_stopping_patience: int = 3
     max_train_batches: int | None = None
     max_validation_batches: int | None = None
@@ -142,6 +147,21 @@ class TrainingOptions:
             raise ValueError("weight_decay must not be negative")
         if self.class_weighting not in {"balanced", "balanced_global", "none"}:
             raise ValueError("class_weighting must be 'balanced', 'balanced_global', or 'none'")
+        if self.positive_class_weight_ratio is not None and (
+            self.class_weighting != "balanced_global"
+            or self.positive_class_weight_ratio <= 0
+        ):
+            raise ValueError(
+                "positive_class_weight_ratio must be positive and requires balanced_global"
+            )
+        if self.selection_metric not in {
+            VIDEO_F1_SELECTION,
+            VIDEO_BALANCED_ACCURACY_SELECTION,
+        }:
+            raise ValueError(
+                "selection_metric must be validation_video_f1 or "
+                "validation_video_balanced_accuracy"
+            )
         batch_limits = (self.max_train_batches, self.max_validation_batches)
         if (batch_limits[0] is None) != (batch_limits[1] is None):
             raise ValueError(
@@ -160,7 +180,11 @@ def source_group_overlap(
     return train_groups & validation_groups
 
 
-def _balanced_class_weights(rows: list[dict[str, str]], device: torch.device) -> torch.Tensor:
+def _balanced_class_weights(
+    rows: list[dict[str, str]],
+    device: torch.device,
+    positive_ratio: float | None = None,
+) -> torch.Tensor:
     counts = [0, 0]
     for row in rows:
         class_id = int(row["class_id"])
@@ -170,6 +194,13 @@ def _balanced_class_weights(rows: list[dict[str, str]], device: torch.device) ->
     if 0 in counts:
         raise ValueError("Balanced class weighting requires both classes in training data")
     total = sum(counts)
+    if positive_ratio is not None:
+        negative_weight = total / (counts[0] + counts[1] * positive_ratio)
+        return torch.tensor(
+            [negative_weight, negative_weight * positive_ratio],
+            dtype=torch.float32,
+            device=device,
+        )
     return torch.tensor(
         [total / (2 * count) for count in counts],
         dtype=torch.float32,
@@ -192,6 +223,7 @@ def _loader(
     shuffle: bool,
     seed: int,
     balanced_limit: int | None = None,
+    require_video_classes: bool = False,
 ) -> DataLoader[Any]:
     if balanced_limit is not None:
         pools = [[index for index, row in enumerate(dataset.rows) if int(row["class_id"]) == label]
@@ -201,8 +233,28 @@ def _loader(
         randomizer = random.Random(seed)
         for pool in pools:
             randomizer.shuffle(pool)
-        indices = []
+        indices: list[int] = []
+        if require_video_classes:
+            from seepat.training.dataset import video_class_id
+
+            genuine = next(
+                (
+                    index for index in pools[0]
+                    if video_class_id(dataset.rows[index].get("manipulation_modality", "real")) == 0
+                ),
+                None,
+            )
+            manipulated = pools[1][0] if pools[1] else None
+            if genuine is None or manipulated is None:
+                raise ValueError(
+                    "Balanced-accuracy readiness requires genuine and manipulated videos"
+                )
+            indices.extend((genuine, manipulated))
+            pools[0].remove(genuine)
+            pools[1].remove(manipulated)
         for index in range(min(balanced_limit, len(dataset))):
+            if len(indices) >= balanced_limit:
+                break
             label = index % 2
             if not pools[label]:
                 label = 1 - label
@@ -267,6 +319,7 @@ def _evaluate(
     max_batches: int | None = None,
     progress: ProgressCallback | None = None,
     phase: str = "validate model",
+    selection_metric: str = VIDEO_F1_SELECTION,
 ) -> dict[str, object]:
     model.eval()
     loss_sum = 0.0
@@ -307,15 +360,40 @@ def _evaluate(
         video_labels,
         event_probabilities,
     )
+    video_metrics = binary_classification_metrics(
+        aggregated_labels,
+        aggregated_probabilities,
+    )
+    if selection_metric == VIDEO_BALANCED_ACCURACY_SELECTION:
+        threshold_selection = choose_balanced_accuracy_threshold(
+            aggregated_labels,
+            aggregated_probabilities,
+        )
+        selected_video_metrics = binary_classification_metrics(
+            aggregated_labels,
+            aggregated_probabilities,
+            float(threshold_selection["threshold"]),
+        )
+        selection = {
+            "metric": selection_metric,
+            "value": threshold_selection["balanced_accuracy"],
+            **threshold_selection,
+        }
+    else:
+        selected_video_metrics = video_metrics
+        selection = {
+            "metric": VIDEO_F1_SELECTION,
+            "value": video_metrics["f1"],
+            "threshold": 0.5,
+        }
     return {
         "loss": loss_sum / event_count,
         "batches": batch_count,
         "events_processed": event_count,
         "events": binary_classification_metrics(event_labels, event_probabilities),
-        "videos": binary_classification_metrics(
-            aggregated_labels,
-            aggregated_probabilities,
-        ),
+        "videos": video_metrics,
+        "selection": selection,
+        "videos_at_selection_threshold": selected_video_metrics,
         "video_aggregation": "maximum event fake probability",
     }
 
@@ -352,7 +430,8 @@ def _checkpoint(
     scaler: torch.amp.GradScaler,
     epoch: int,
     global_step: int,
-    best_video_f1: float,
+    best_selection_value: float,
+    best_selection_fpr: float | None,
     best_epoch: int,
     epochs_without_improvement: int,
     history: list[dict[str, object]],
@@ -363,7 +442,14 @@ def _checkpoint(
         "checkpoint_type": "seepat_resumable_training",
         "completed_epoch": epoch,
         "global_step": global_step,
-        "best_video_f1": best_video_f1,
+        "best_selection_metric": options.selection_metric,
+        "best_selection_value": best_selection_value,
+        "best_selection_fpr": best_selection_fpr,
+        **(
+            {"best_video_f1": best_selection_value}
+            if options.selection_metric == VIDEO_F1_SELECTION
+            else {}
+        ),
         "best_epoch": best_epoch,
         "epochs_without_improvement": epochs_without_improvement,
         "model_state": model.state_dict(),
@@ -374,6 +460,60 @@ def _checkpoint(
         "resume_contract": resume_contract,
         "rng_state": _rng_state(),
     }
+
+
+def _percent(value: object) -> str:
+    return f"{float(value):.2%}"
+
+
+def _print_epoch_summary(
+    epoch: int,
+    epochs: int,
+    updates: int,
+    skipped: int,
+    train_loss: float,
+    validation: dict[str, object],
+    improved: bool,
+) -> None:
+    selection = validation["selection"]
+    videos = validation["videos_at_selection_threshold"]
+    balanced_accuracy = (float(videos["recall"]) + float(videos["specificity"])) / 2
+    print("\n" + "=" * 72)
+    print(f"EPOCH {epoch}/{epochs}  |  {'NEW BEST' if improved else 'no improvement'}")
+    print(
+        f"Updates {updates:,}  |  skipped {skipped:,}  |  "
+        f"train loss {train_loss:.6f}  |  val loss {float(validation['loss']):.6f}"
+    )
+    print(
+        f"Threshold {float(selection['threshold']):.6f}  |  "
+        f"balanced accuracy {_percent(balanced_accuracy)}  |  F1 {_percent(videos['f1'])}"
+    )
+    print(
+        f"Recall {_percent(videos['recall'])}  |  "
+        f"specificity {_percent(videos['specificity'])}  |  "
+        f"FPR {_percent(videos['false_positive_rate'])}"
+    )
+    print(f"Selection: {selection['metric']} = {_percent(selection['value'])}")
+    print("=" * 72)
+
+
+def _print_training_summary(run: dict[str, object]) -> None:
+    reason = "early stopping" if run["stopped_early"] else "epoch target reached"
+    print("\n" + "#" * 72)
+    print("TRAINING COMPLETE")
+    print(
+        f"Epochs {run['completed_epochs']}/{run['requested_epochs']} ({reason})  |  "
+        f"best epoch {run['best_epoch']}"
+    )
+    print(
+        f"Best {run['selection_metric']} = {_percent(run['best_selection_value'])}  |  "
+        f"FPR {_percent(run['best_selection_fpr'])}"
+    )
+    print(
+        f"Optimizer updates {run['global_step']:,}  |  "
+        f"elapsed {float(run['elapsed_seconds']) / 3600:.2f} h"
+    )
+    print("#" * 72)
 
 
 def train_model(
@@ -407,7 +547,7 @@ def train_model(
             "step_counting": "completed_optimizer_updates",
         },
         "selection": {
-            "metric": "validation_video_f1",
+            "metric": options.selection_metric,
             "early_stopping_patience": options.early_stopping_patience,
         },
         "batch_limits": {
@@ -431,7 +571,11 @@ def train_model(
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
     class_weights = (
-        _balanced_class_weights(train_rows, device)
+        _balanced_class_weights(
+            train_rows,
+            device,
+            positive_ratio=options.positive_class_weight_ratio,
+        )
         if options.class_weighting in {"balanced", "balanced_global"}
         else None
     )
@@ -446,7 +590,8 @@ def train_model(
     history: list[dict[str, object]] = []
     start_epoch = 1
     global_step = 0
-    best_video_f1 = -1.0
+    best_selection_value = -1.0
+    best_selection_fpr: float | None = None
     best_epoch = 0
     epochs_without_improvement = 0
     if resume_from is not None:
@@ -463,7 +608,11 @@ def train_model(
         history = list(checkpoint["history"])
         start_epoch = int(checkpoint["completed_epoch"]) + 1
         global_step = int(checkpoint["global_step"])
-        best_video_f1 = float(checkpoint["best_video_f1"])
+        best_selection_value = float(
+            checkpoint.get("best_selection_value", checkpoint.get("best_video_f1", -1.0))
+        )
+        stored_fpr = checkpoint.get("best_selection_fpr")
+        best_selection_fpr = float(stored_fpr) if stored_fpr is not None else None
         best_epoch = int(checkpoint["best_epoch"])
         epochs_without_improvement = int(checkpoint["epochs_without_improvement"])
         _restore_rng_state(checkpoint["rng_state"])
@@ -561,6 +710,10 @@ def train_model(
             seed=options.seed,
             balanced_limit=(validation_batches_per_epoch * options.batch_size
                             if limited_run and options.class_weighting == "balanced_global" else None),
+            require_video_classes=(
+                limited_run
+                and options.selection_metric == VIDEO_BALANCED_ACCURACY_SELECTION
+            ),
         )
         for epoch in range(start_epoch, options.epochs + 1):
             train_loader = _loader(
@@ -649,10 +802,6 @@ def train_model(
                          train_batches_per_epoch, "")
 
             epoch_optimizer_steps = global_step - epoch_start_step
-            print(
-                f"Epoch {epoch}/{options.epochs}: {epoch_optimizer_steps} optimizer updates, "
-                f"{epoch_skipped_steps} skipped"
-            )
             if epoch_optimizer_steps == 0:
                 raise RuntimeError(
                     "No optimizer updates completed this epoch; AMP may have skipped "
@@ -670,6 +819,7 @@ def train_model(
                 max_batches=options.max_validation_batches,
                 progress=progress,
                 phase=f"validate epoch {epoch}/{options.epochs}",
+                selection_metric=options.selection_metric,
             )
             processed_validation_events += int(validation["events_processed"])
             epoch_record: dict[str, object] = {
@@ -696,15 +846,35 @@ def train_model(
                     f"{train_batches_per_epoch} Train batches and "
                     f"{validation['batches']} Validation batches complete"
                 )
-            current_video_f1 = float(validation["videos"]["f1"])  # type: ignore[index]
-            improved = current_video_f1 > best_video_f1
+            current_selection_value = float(validation["selection"]["value"])  # type: ignore[index]
+            current_selection_fpr = float(  # type: ignore[index]
+                validation["videos_at_selection_threshold"]["false_positive_rate"]
+            )
+            improved = current_selection_value > best_selection_value or (
+                options.selection_metric == VIDEO_BALANCED_ACCURACY_SELECTION
+                and current_selection_value == best_selection_value
+                and (
+                    best_selection_fpr is None
+                    or current_selection_fpr < best_selection_fpr
+                )
+            )
             if improved:
-                best_video_f1 = current_video_f1
+                best_selection_value = current_selection_value
+                best_selection_fpr = current_selection_fpr
                 best_epoch = epoch
                 epochs_without_improvement = 0
             else:
                 epochs_without_improvement += 1
             last_completed_epoch = epoch
+            _print_epoch_summary(
+                epoch,
+                options.epochs,
+                epoch_optimizer_steps,
+                epoch_skipped_steps,
+                loss_sum / event_count,
+                validation,
+                improved,
+            )
 
             checkpoint = _checkpoint(
                 model=model,
@@ -712,7 +882,8 @@ def train_model(
                 scaler=scaler,
                 epoch=epoch,
                 global_step=global_step,
-                best_video_f1=best_video_f1,
+                best_selection_value=best_selection_value,
+                best_selection_fpr=best_selection_fpr,
                 best_epoch=best_epoch,
                 epochs_without_improvement=epochs_without_improvement,
                 history=history,
@@ -728,8 +899,8 @@ def train_model(
                     {
                         "checkpoint_type": "seepat_evaluation_model",
                         "completed_epoch": epoch,
-                        "selection_metric": "validation_video_f1",
-                        "selection_metric_value": current_video_f1,
+                        "selection_metric": options.selection_metric,
+                        "selection_metric_value": current_selection_value,
                         "model_state": model.state_dict(),
                         "options": asdict(options),
                         "resume_contract": resume_contract,
@@ -768,7 +939,14 @@ def train_model(
             "stopped_early": stopped_early,
             "global_step": global_step,
             "best_epoch": best_epoch,
-            "best_validation_video_f1": best_video_f1,
+            "selection_metric": options.selection_metric,
+            "best_selection_value": best_selection_value,
+            "best_selection_fpr": best_selection_fpr,
+            **(
+                {"best_validation_video_f1": best_selection_value}
+                if options.selection_metric == VIDEO_F1_SELECTION
+                else {"best_validation_video_balanced_accuracy": best_selection_value}
+            ),
             "processed_train_events": processed_train_events,
             "processed_validation_events": processed_validation_events,
             "processed_events_per_second": (
@@ -783,6 +961,7 @@ def train_model(
         }
     )
     atomic_write_json(output_dir / "run.json", run_record)
+    _print_training_summary(run_record)
     return run_record
 
 
@@ -857,6 +1036,8 @@ def train_from_manifests(
         "train_manifest_sha256": _sha256(train_manifest),
         "validation_manifest_sha256": _sha256(validation_manifest),
     }
+    if options.positive_class_weight_ratio is not None:
+        resume_contract["positive_class_weight_ratio"] = options.positive_class_weight_ratio
     if model_name == FUSION_MODEL:
         resume_contract["fusion_inputs"] = train_dataset.calibration_contract
     return train_model(
@@ -917,6 +1098,12 @@ def main() -> None:
         choices=("balanced", "balanced_global", "none"),
         default="balanced",
     )
+    parser.add_argument("--positive-class-weight-ratio", type=float)
+    parser.add_argument(
+        "--selection-metric",
+        choices=(VIDEO_F1_SELECTION, VIDEO_BALANCED_ACCURACY_SELECTION),
+        default=VIDEO_F1_SELECTION,
+    )
     args = parser.parse_args()
 
     options = TrainingOptions(
@@ -932,6 +1119,8 @@ def main() -> None:
         amp=args.amp,
         freeze_backbone=args.freeze_backbone,
         class_weighting=args.class_weighting,
+        positive_class_weight_ratio=args.positive_class_weight_ratio,
+        selection_metric=args.selection_metric,
         early_stopping_patience=args.early_stopping_patience,
         max_train_batches=args.max_train_batches,
         max_validation_batches=args.max_val_batches,

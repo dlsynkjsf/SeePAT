@@ -15,6 +15,7 @@ from seepat.workflow import (
     WorkflowJob,
     WorkflowSettings,
     _sha256,
+    format_workflow_summary,
     load_workflow_settings,
     model_training_outputs_are_current,
     preprocessing_outputs_are_current,
@@ -23,6 +24,27 @@ from seepat.workflow import (
     run_workflow_job,
     training_outputs_are_current,
 )
+
+
+def test_terminal_workflow_summary_is_compact_and_aligned(tmp_path: Path) -> None:
+    text = format_workflow_summary(
+        {
+            "model_training": [{
+                "name": "fusion-ratio10",
+                "action": "ran",
+                "summary": {
+                    "selection_metric": "validation_video_balanced_accuracy",
+                    "best_selection_value": 0.625,
+                    "best_epoch": 3,
+                },
+            }],
+        },
+        tmp_path / "report.json",
+    )
+    assert "WORKFLOW COMPLETE" in text
+    assert "fusion-ratio10" in text
+    assert "62.50%" in text
+    assert str(tmp_path / "report.json") in text
 
 
 def _write_pipeline_config(tmp_path: Path) -> tuple[Path, Path, Path]:
@@ -399,6 +421,9 @@ def test_model_training_current_check_validates_manifests(tmp_path: Path) -> Non
     training_version = train_module.TRAINING_VERSION
     job = _model_training_job(tmp_path)
     options = TrainingOptions(**job.options)
+    recorded_options = asdict(options)
+    recorded_options.pop("positive_class_weight_ratio")
+    recorded_options.pop("selection_metric")
     job.output_dir.mkdir(parents=True)
     atomic_write_json(job.output_dir / "history.json", [{"epoch": 1}])
     (job.output_dir / "checkpoint_last.pt").write_bytes(b"checkpoint")
@@ -410,7 +435,7 @@ def test_model_training_current_check_validates_manifests(tmp_path: Path) -> Non
             "run_type": "engineering_preflight",
             "device": "cuda",
             "completed_epochs": 1,
-            "options": asdict(options),
+            "options": recorded_options,
             "resume_contract": {
                 "training_version": training_version,
                 "model": "torchvision.swin3d_b",

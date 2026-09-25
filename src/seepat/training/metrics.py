@@ -56,6 +56,49 @@ def binary_classification_metrics(
     }
 
 
+def choose_balanced_accuracy_threshold(
+    labels: Sequence[int],
+    probabilities: Sequence[float],
+) -> dict[str, int | float]:
+    """Choose the lowest threshold that maximizes balanced accuracy."""
+    if len(labels) != len(probabilities) or not labels:
+        raise ValueError("labels and probabilities must have the same non-zero length")
+    if any(label not in {0, 1} for label in labels):
+        raise ValueError("binary labels must be 0 or 1")
+    if any(not math.isfinite(p) or not 0 <= p <= 1 for p in probabilities):
+        raise ValueError("probabilities must be finite values between 0 and 1")
+    positives = sum(labels)
+    negatives = len(labels) - positives
+    if positives == 0 or negatives == 0:
+        raise ValueError("Threshold selection requires both classes in the data")
+
+    grouped: dict[float, list[int]] = {}
+    for label, probability in zip(labels, probabilities, strict=True):
+        grouped.setdefault(probability, []).append(label)
+
+    true_positives = false_positives = 0
+    grouped.setdefault(0.0, [])
+    best_threshold = 0.0
+    best_score = -1
+    for probability in sorted(grouped, reverse=True):
+        for label in grouped[probability]:
+            true_positives += label == 1
+            false_positives += label == 0
+        # Integer comparison avoids floating-point tie drift. Descending scan
+        # plus >= implements the documented lowest-threshold tie break.
+        score = true_positives * negatives + (negatives - false_positives) * positives
+        if score >= best_score:
+            best_score = score
+            best_threshold = probability
+    return {
+        "threshold": best_threshold,
+        "balanced_accuracy": best_score / (2 * positives * negatives),
+        "samples": len(labels),
+        "positives": positives,
+        "negatives": negatives,
+    }
+
+
 def aggregate_video_probabilities(
     video_ids: Sequence[str],
     video_labels: Sequence[int],

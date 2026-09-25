@@ -8,13 +8,13 @@ ablation_study:
   validation_manifest: outputs/trace_augmentation/val/events_augmented.csv
   output_dir: outputs/ablation_study/guarded_base_en_v1
   # User-selected phases: prepare -> calibration -> audit -> readiness -> train -> evaluate
-  phase: prepare
+  phase: evaluate
   folds: 5
   seed: 20260916
   device: cuda
   project_root: .
   # Run readiness at 1, then set to 2 and rerun separately to check resume.
-  readiness_epochs: 1
+  readiness_epochs: 2
   epochs: 10
   # H3 requires these three models: 15 fits across five folds.
   models:
