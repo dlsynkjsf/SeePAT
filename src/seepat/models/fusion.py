@@ -92,6 +92,7 @@ class HybridFusionEventClassifier(nn.Module):
         self,
         pretrained: bool = True,
         freeze_backbone: bool = False,
+        unfreeze_final_backbone_stages: bool = False,
         swin_backbone: nn.Module | None = None,
         frame_backbone: nn.Module | None = None,
         evidence_features: int = len(FUSION_EVIDENCE_FIELDS),
@@ -108,6 +109,8 @@ class HybridFusionEventClassifier(nn.Module):
         super().__init__()
         if evidence_features < 1 or evidence_hidden < 1:
             raise ValueError("evidence feature counts must be positive")
+        if unfreeze_final_backbone_stages and not freeze_backbone:
+            raise ValueError("Final-stage unfreezing requires an otherwise frozen backbone")
 
         if swin_backbone is None:
             weights = Swin3D_B_Weights.KINETICS400_V1 if pretrained else None
@@ -172,17 +175,42 @@ class HybridFusionEventClassifier(nn.Module):
         )
 
         self.freeze_backbone = freeze_backbone
+        self.unfreeze_final_backbone_stages = unfreeze_final_backbone_stages
+        self.trainable_backbone_modules: tuple[nn.Module, ...] = ()
         if freeze_backbone:
             for branch in (self.backbone, self.frame_backbone):
                 for parameter in branch.parameters():
                     parameter.requires_grad = False
                 branch.eval()
+        if unfreeze_final_backbone_stages:
+            modules: list[nn.Module] = []
+            for branch in (self.backbone, self.frame_backbone):
+                features = getattr(branch, "features", None)
+                if isinstance(features, nn.Sequential) and len(features):
+                    modules.append(features[-1])
+                    normalization = getattr(branch, "norm", None)
+                    if isinstance(normalization, nn.Module):
+                        modules.append(normalization)
+                else:
+                    modules.append(
+                        next(
+                            module
+                            for module in reversed(list(branch.children()))
+                            if next(module.parameters(), None) is not None
+                        )
+                    )
+            self.trainable_backbone_modules = tuple(dict.fromkeys(modules))
+            for module in self.trainable_backbone_modules:
+                for parameter in module.parameters():
+                    parameter.requires_grad = True
 
     def train(self, mode: bool = True) -> HybridFusionEventClassifier:
         super().train(mode)
         if self.freeze_backbone:
             self.backbone.eval()
             self.frame_backbone.eval()
+            for module in self.trainable_backbone_modules:
+                module.train(mode)
         return self
 
     def _swin_features(self, video: Tensor) -> Tensor:
@@ -203,7 +231,9 @@ class HybridFusionEventClassifier(nn.Module):
             width,
         )
         normalized = (frame_batch - self.frame_pixel_mean) / self.frame_pixel_std
-        gradients_enabled = torch.is_grad_enabled() and not self.freeze_backbone
+        gradients_enabled = torch.is_grad_enabled() and (
+            not self.freeze_backbone or self.unfreeze_final_backbone_stages
+        )
         with torch.set_grad_enabled(gradients_enabled):
             frame_features = self.frame_backbone(normalized)
         if frame_features.ndim != 2:

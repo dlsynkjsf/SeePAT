@@ -1,0 +1,46 @@
+# Phase-2 bounded readiness. Run epoch 1, change epochs to 2, then rerun.
+report: outputs/workflow_fusion_phase2_readiness_summary.json
+
+model_training:
+  - &candidate
+    name: readiness-phase2-partial-unfreeze
+    model: swin3d_b_vild_fusion
+    train_manifest: &train outputs/numerical_calibration/guarded_per_video_v3/events_train_calibrated.csv
+    validation_manifest: &val outputs/numerical_calibration/guarded_per_video_v3/events_val_calibrated.csv
+    initialize_from: &initial outputs/training/fusion_tuning_v1/experiments/ratio10/checkpoint_best.pt
+    output_dir: outputs/training/fusion_phase2_v1/readiness/partial_unfreeze
+    project_root: .
+    device: cuda
+    pretrained: true
+    options: &partial_options
+      epochs: 1
+      batch_size: 1
+      workers: 0
+      learning_rate: 0.0001
+      backbone_learning_rate: 0.00001
+      weight_decay: 0.01
+      gradient_accumulation_steps: 4
+      sequence_length: 16
+      image_size: 224
+      seed: 20260928
+      amp: false
+      freeze_backbone: true
+      unfreeze_final_backbone_stages: true
+      class_weighting: balanced_global
+      positive_class_weight_ratio: 10.0
+      loss_function: cross_entropy
+      focal_gamma: 2.0
+      selection_metric: validation_video_balanced_accuracy
+      early_stopping_patience: 3
+      max_train_batches: 16
+      max_validation_batches: 8
+
+  - <<: *candidate
+    name: readiness-phase2-focal
+    initialize_from: *initial
+    output_dir: outputs/training/fusion_phase2_v1/readiness/focal
+    options:
+      <<: *partial_options
+      backbone_learning_rate: null
+      unfreeze_final_backbone_stages: false
+      loss_function: focal

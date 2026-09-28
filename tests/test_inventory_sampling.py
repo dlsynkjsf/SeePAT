@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from seepat.data.inventory import build_inventory
+from seepat.data.inventory import build_inventory, file_sha256
 from seepat.data.sampling import (
     canonical_source_group,
     sample_pilot,
@@ -203,3 +203,29 @@ def test_training_canary_is_balanced_deterministic_and_validation_safe(
     assert first_summary["category_counts"] == {category: 2 for category in categories}
     assert first_summary["selected_source_groups"] == 8
     assert first_summary["manifest_sha256"] == second_summary["manifest_sha256"]
+
+    disjoint_manifest = tmp_path / "disjoint.csv"
+    disjoint, disjoint_summary = sample_training_canary(
+        database_path=database_path,
+        output_path=disjoint_manifest,
+        summary_path=tmp_path / "disjoint.json",
+        split="train",
+        categories=categories,
+        per_category=2,
+        seed=789,
+        excluded_splits=("val",),
+        excluded_manifests=(first_manifest,),
+        purpose="phase2_outer_development_cohort",
+    )
+    assert not (
+        {str(row["source_group"]) for row in first}
+        & {str(row["source_group"]) for row in disjoint}
+    )
+    assert disjoint_summary["purpose"] == "phase2_outer_development_cohort"
+    assert disjoint_summary["excluded_manifests"] == [
+        {
+            "path": first_manifest.as_posix(),
+            "sha256": file_sha256(first_manifest),
+            "rows": 8,
+        }
+    ]

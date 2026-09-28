@@ -81,7 +81,13 @@ def build_event_classifier(
     model_name: str,
     pretrained: bool,
     freeze_backbone: bool,
+    unfreeze_final_backbone_stages: bool = False,
 ) -> nn.Module:
+    if unfreeze_final_backbone_stages and model_name not in {
+        FUSION_MODEL,
+        VISUAL_FUSION_MODEL,
+    }:
+        raise ValueError("Final-stage unfreezing is supported only by fusion models")
     if model_name == SWIN_BASE_MODEL:
         return SwinBaseEventClassifier(
             pretrained=pretrained,
@@ -101,6 +107,7 @@ def build_event_classifier(
         return HybridFusionEventClassifier(
             pretrained=pretrained,
             freeze_backbone=freeze_backbone,
+            unfreeze_final_backbone_stages=unfreeze_final_backbone_stages,
             use_evidence=model_name == FUSION_MODEL,
         )
     raise ValueError(f"Unsupported training model: {model_name!r}")
@@ -119,8 +126,12 @@ class TrainingOptions:
     seed: int = 20260823
     amp: bool = True
     freeze_backbone: bool = False
+    unfreeze_final_backbone_stages: bool = False
+    backbone_learning_rate: float | None = None
     class_weighting: str = "balanced"
     positive_class_weight_ratio: float | None = None
+    loss_function: str = "cross_entropy"
+    focal_gamma: float = 2.0
     selection_metric: str = VIDEO_F1_SELECTION
     early_stopping_patience: int = 3
     max_train_batches: int | None = None
@@ -145,6 +156,17 @@ class TrainingOptions:
             raise ValueError("learning_rate must be positive")
         if self.weight_decay < 0:
             raise ValueError("weight_decay must not be negative")
+        if self.unfreeze_final_backbone_stages and not self.freeze_backbone:
+            raise ValueError("Final-stage unfreezing requires freeze_backbone")
+        if self.unfreeze_final_backbone_stages and self.backbone_learning_rate is None:
+            raise ValueError("Final-stage unfreezing requires backbone_learning_rate")
+        if self.backbone_learning_rate is not None and (
+            not self.unfreeze_final_backbone_stages
+            or self.backbone_learning_rate <= 0
+        ):
+            raise ValueError(
+                "backbone_learning_rate must be positive and requires final-stage unfreezing"
+            )
         if self.class_weighting not in {"balanced", "balanced_global", "none"}:
             raise ValueError("class_weighting must be 'balanced', 'balanced_global', or 'none'")
         if self.positive_class_weight_ratio is not None and (
@@ -154,6 +176,10 @@ class TrainingOptions:
             raise ValueError(
                 "positive_class_weight_ratio must be positive and requires balanced_global"
             )
+        if self.loss_function not in {"cross_entropy", "focal"}:
+            raise ValueError("loss_function must be 'cross_entropy' or 'focal'")
+        if self.focal_gamma < 0:
+            raise ValueError("focal_gamma must not be negative")
         if self.selection_metric not in {
             VIDEO_F1_SELECTION,
             VIDEO_BALANCED_ACCURACY_SELECTION,
@@ -206,6 +232,30 @@ def _balanced_class_weights(
         dtype=torch.float32,
         device=device,
     )
+
+
+class _FocalLoss(nn.Module):
+    def __init__(
+        self,
+        weight: torch.Tensor | None,
+        gamma: float,
+        reduction: str,
+    ) -> None:
+        super().__init__()
+        self.register_buffer("weight", weight)
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        cross_entropy = F.cross_entropy(
+            logits,
+            labels,
+            weight=self.weight,
+            reduction="none",
+        )
+        probabilities = F.softmax(logits, dim=1).gather(1, labels[:, None]).squeeze(1)
+        loss = (1 - probabilities).pow(self.gamma) * cross_entropy
+        return loss.mean() if self.reduction == "mean" else loss
 
 
 def _seed_everything(seed: int) -> None:
@@ -542,6 +592,7 @@ def train_model(
         "optimizer": {
             "name": "AdamW",
             "learning_rate": options.learning_rate,
+            "backbone_learning_rate": options.backbone_learning_rate,
             "weight_decay": options.weight_decay,
             "gradient_accumulation_steps": options.gradient_accumulation_steps,
             "step_counting": "completed_optimizer_updates",
@@ -561,8 +612,28 @@ def train_model(
     trainable_parameters = [parameter for parameter in model.parameters() if parameter.requires_grad]
     if not trainable_parameters:
         raise ValueError("The model has no trainable parameters")
+    optimizer_parameters: object = trainable_parameters
+    if options.backbone_learning_rate is not None:
+        branches = (getattr(model, "backbone", None), getattr(model, "frame_backbone", None))
+        backbone_parameters = [
+            parameter
+            for branch in branches
+            if isinstance(branch, nn.Module)
+            for parameter in branch.parameters()
+            if parameter.requires_grad
+        ]
+        backbone_ids = {id(parameter) for parameter in backbone_parameters}
+        head_parameters = [
+            parameter for parameter in trainable_parameters if id(parameter) not in backbone_ids
+        ]
+        if not backbone_parameters or not head_parameters:
+            raise ValueError("Differential learning rates require trainable backbone and head parameters")
+        optimizer_parameters = [
+            {"params": head_parameters, "lr": options.learning_rate},
+            {"params": backbone_parameters, "lr": options.backbone_learning_rate},
+        ]
     optimizer = torch.optim.AdamW(
-        trainable_parameters,
+        optimizer_parameters,
         lr=options.learning_rate,
         weight_decay=options.weight_decay,
     )
@@ -581,9 +652,11 @@ def train_model(
     )
     # Global Train weights must survive batch size one and gradient accumulation.
     # Retain the old batch-normalized mode for historical checkpoint replay.
-    loss_function = nn.CrossEntropyLoss(
-        weight=class_weights,
-        reduction="none" if options.class_weighting == "balanced_global" else "mean",
+    reduction = "none" if options.class_weighting == "balanced_global" else "mean"
+    loss_function: nn.Module = (
+        _FocalLoss(class_weights, options.focal_gamma, reduction)
+        if options.loss_function == "focal"
+        else nn.CrossEntropyLoss(weight=class_weights, reduction=reduction)
     )
 
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -729,6 +802,8 @@ def train_model(
             model.train()
             if options.freeze_backbone and hasattr(model, "backbone"):
                 model.backbone.eval()
+                for module in getattr(model, "trainable_backbone_modules", ()):
+                    module.train()
             optimizer.zero_grad(set_to_none=True)
             loss_sum = 0.0
             event_count = 0
@@ -828,6 +903,7 @@ def train_model(
                 "optimizer_steps": epoch_optimizer_steps,
                 "skipped_optimizer_steps": epoch_skipped_steps,
                 "learning_rate": optimizer.param_groups[0]["lr"],
+                "learning_rates": [group["lr"] for group in optimizer.param_groups],
                 "train": {
                     "loss": loss_sum / event_count,
                     "batches": train_batches_per_epoch,
@@ -981,6 +1057,47 @@ def _device(name: str) -> torch.device:
     return torch.device(name)
 
 
+def _initialize_model_from_checkpoint(
+    model: nn.Module,
+    checkpoint_path: Path,
+    expected_contract: dict[str, object],
+) -> None:
+    checkpoint = torch.load(
+        checkpoint_path,
+        map_location="cpu",
+        weights_only=False,
+        mmap=True,
+    )
+    contract = checkpoint.get("resume_contract")
+    if checkpoint.get("checkpoint_type") != "seepat_evaluation_model" or not isinstance(
+        contract, dict
+    ):
+        raise ValueError("Initial checkpoint must be a SeePAT evaluation model")
+    immutable = (
+        "training_version",
+        "model",
+        "model_name",
+        "pretrained",
+        "sequence_length",
+        "image_size",
+        "evidence_fields",
+        "train_manifest_sha256",
+        "validation_manifest_sha256",
+        "fusion_inputs",
+    )
+    if any(contract.get(key) != expected_contract.get(key) for key in immutable):
+        raise ValueError("Initial checkpoint does not match the model, manifests, or evidence")
+    run = json.loads((checkpoint_path.parent / "run.json").read_text(encoding="utf-8"))
+    if (
+        run.get("status") != "complete"
+        or run.get("run_type") != "training_experiment"
+        or run.get("resume_contract") != contract
+        or Path(str(run.get("best_checkpoint", ""))).resolve() != checkpoint_path.resolve()
+    ):
+        raise ValueError("Initial checkpoint must be the selected output of a completed experiment")
+    model.load_state_dict(checkpoint["model_state"])
+
+
 def train_from_manifests(
     train_manifest: Path,
     validation_manifest: Path,
@@ -991,6 +1108,7 @@ def train_from_manifests(
     pretrained: bool,
     model_name: str = SWIN_BASE_MODEL,
     resume_from: Path | None = None,
+    initialize_from: Path | None = None,
     progress: ProgressCallback | None = None,
 ) -> dict[str, object]:
     device = _device(device_name)
@@ -1020,8 +1138,9 @@ def train_from_manifests(
     _seed_everything(options.seed)
     model = build_event_classifier(
         model_name=model_name,
-        pretrained=pretrained and resume_from is None,
+        pretrained=pretrained and resume_from is None and initialize_from is None,
         freeze_backbone=options.freeze_backbone,
+        unfreeze_final_backbone_stages=options.unfreeze_final_backbone_stages,
     )
     resume_contract = {
         "training_version": training_version_for_model(model_name),
@@ -1029,6 +1148,7 @@ def train_from_manifests(
         "model_name": model_name,
         "pretrained": pretrained,
         "freeze_backbone": options.freeze_backbone,
+        "unfreeze_final_backbone_stages": options.unfreeze_final_backbone_stages,
         "sequence_length": options.sequence_length,
         "image_size": options.image_size,
         "class_weighting": options.class_weighting,
@@ -1040,6 +1160,13 @@ def train_from_manifests(
         resume_contract["positive_class_weight_ratio"] = options.positive_class_weight_ratio
     if model_name == FUSION_MODEL:
         resume_contract["fusion_inputs"] = train_dataset.calibration_contract
+    if initialize_from is not None:
+        resume_contract["initial_checkpoint"] = {
+            "path": initialize_from.as_posix(),
+            "sha256": _sha256(initialize_from),
+        }
+        if resume_from is None:
+            _initialize_model_from_checkpoint(model, initialize_from, resume_contract)
     return train_model(
         model=model,
         train_dataset=train_dataset,
@@ -1060,6 +1187,7 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--project-root", type=Path, default=Path("."))
     parser.add_argument("--resume-from", type=Path)
+    parser.add_argument("--initialize-from", type=Path)
     parser.add_argument("--model", choices=SUPPORTED_MODELS, default=SWIN_BASE_MODEL)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--epochs", type=int, default=10)
@@ -1094,11 +1222,23 @@ def main() -> None:
         default=False,
     )
     parser.add_argument(
+        "--unfreeze-final-backbone-stages",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+    )
+    parser.add_argument("--backbone-learning-rate", type=float)
+    parser.add_argument(
         "--class-weighting",
         choices=("balanced", "balanced_global", "none"),
         default="balanced",
     )
     parser.add_argument("--positive-class-weight-ratio", type=float)
+    parser.add_argument(
+        "--loss-function",
+        choices=("cross_entropy", "focal"),
+        default="cross_entropy",
+    )
+    parser.add_argument("--focal-gamma", type=float, default=2.0)
     parser.add_argument(
         "--selection-metric",
         choices=(VIDEO_F1_SELECTION, VIDEO_BALANCED_ACCURACY_SELECTION),
@@ -1118,8 +1258,12 @@ def main() -> None:
         seed=args.seed,
         amp=args.amp,
         freeze_backbone=args.freeze_backbone,
+        unfreeze_final_backbone_stages=args.unfreeze_final_backbone_stages,
+        backbone_learning_rate=args.backbone_learning_rate,
         class_weighting=args.class_weighting,
         positive_class_weight_ratio=args.positive_class_weight_ratio,
+        loss_function=args.loss_function,
+        focal_gamma=args.focal_gamma,
         selection_metric=args.selection_metric,
         early_stopping_patience=args.early_stopping_patience,
         max_train_batches=args.max_train_batches,
@@ -1135,6 +1279,7 @@ def main() -> None:
         pretrained=args.pretrained,
         model_name=args.model,
         resume_from=args.resume_from,
+        initialize_from=args.initialize_from,
     )
     print(json.dumps(report, indent=2))
 

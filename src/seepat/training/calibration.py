@@ -421,11 +421,38 @@ def score_manifests_with_calibration(
         "mode": "score_only",
         "strategy": "frozen Train parameters; independent input-video forest fitting",
         "calibration_version": CALIBRATION_VERSION,
+        "calibration": calibration_path.as_posix(),
         "calibration_sha256": file_sha256(calibration_path),
         "input_hashes": dependencies,
     }
     atomic_write_json(output_dir / "summary.json", summary)
     return summary
+
+
+def score_only_outputs_are_current(
+    calibration_path: Path,
+    score_manifests: dict[str, Path],
+    output_dir: Path,
+) -> bool:
+    try:
+        summary = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
+        return (
+            summary.get("mode") == "score_only"
+            and Path(summary["calibration"]).resolve() == calibration_path.resolve()
+            and summary["calibration_sha256"] == file_sha256(calibration_path)
+            and summary["input_hashes"]
+            == verified_manifest_dependencies(list(score_manifests.values()))
+            and set(summary["scored_manifests"]) == set(score_manifests)
+            and summary["audit_sha256"] == file_sha256(Path(summary["audit"]))
+            and recorded_hashes_are_current(
+                {
+                    summary["scored_manifests"][name]: digest
+                    for name, digest in summary["scored_manifest_sha256"].items()
+                }
+            )
+        )
+    except (OSError, ValueError, TypeError, KeyError):
+        return False
 
 
 def calibration_outputs_are_current(

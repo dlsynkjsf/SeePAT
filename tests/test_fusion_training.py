@@ -218,6 +218,79 @@ def test_fusion_rejects_different_train_and_validation_populations(tmp_path, mon
         )
 
 
+def test_phase2_initializes_from_selected_checkpoint_and_uses_two_learning_rates(
+    tmp_path,
+    monkeypatch,
+):
+    paths = calibrated_inputs(tmp_path)
+
+    def build(**kwargs):
+        return _tiny_model(
+            freeze_backbone=kwargs["freeze_backbone"],
+            unfreeze_final_backbone_stages=kwargs.get(
+                "unfreeze_final_backbone_stages",
+                False,
+            ),
+        )
+
+    monkeypatch.setattr("seepat.training.train.build_event_classifier", build)
+    common = {
+        "sequence_length": 4,
+        "image_size": 8,
+        "amp": False,
+        "freeze_backbone": True,
+        "class_weighting": "balanced_global",
+        "positive_class_weight_ratio": 10.0,
+        "selection_metric": "validation_video_balanced_accuracy",
+    }
+    source = ModelTrainingJob(
+        "source",
+        paths["train"],
+        paths["val"],
+        tmp_path / "source",
+        tmp_path,
+        "cpu",
+        False,
+        {"epochs": 1, **common},
+        FUSION_MODEL,
+    )
+    run_model_training_job(source)
+    initial = source.output_dir / "checkpoint_best.pt"
+    phase2 = ModelTrainingJob(
+        "phase2",
+        paths["train"],
+        paths["val"],
+        tmp_path / "phase2",
+        tmp_path,
+        "cpu",
+        False,
+        {
+            "epochs": 1,
+            "learning_rate": 0.01,
+            "unfreeze_final_backbone_stages": True,
+            "backbone_learning_rate": 0.001,
+            **common,
+        },
+        FUSION_MODEL,
+        initialize_from=initial,
+    )
+
+    report = run_model_training_job(phase2)["summary"]
+    checkpoint = torch.load(
+        phase2.output_dir / "checkpoint_last.pt",
+        weights_only=False,
+    )
+
+    assert report["resume_contract"]["initial_checkpoint"]["sha256"] == file_sha256(
+        initial
+    )
+    assert [group["lr"] for group in checkpoint["optimizer_state"]["param_groups"]] == [
+        0.01,
+        0.001,
+    ]
+    assert checkpoint["history"][0]["learning_rates"] == [0.01, 0.001]
+
+
 def test_fusion_preflight_config_resumes_into_normal_workflow_without_changing_baselines():
     scaled = load_workflow_settings(Path("configs/workflow_scaled.yaml"))
     setup = load_workflow_settings(Path("configs/workflow_fusion_preflight.yaml"))

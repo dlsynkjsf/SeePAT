@@ -199,6 +199,12 @@ def test_frozen_population_and_resume_cache_and_hash_invalidation(tmp_path, monk
         out / "calibration.json", {"test": external}, tmp_path / "scored"
     )
     assert summary["mode"] == "score_only"
+    assert Path(summary["calibration"]).resolve() == (out / "calibration.json").resolve()
+    assert cal.score_only_outputs_are_current(
+        out / "calibration.json",
+        {"test": external},
+        tmp_path / "scored",
+    )
     assert file_sha256(out / "calibration.json") == digest
     Path(read_csv_rows(val)[0]["vild_trace_path"]).write_bytes(b"corrupt")
     assert not cal.calibration_outputs_are_current(
