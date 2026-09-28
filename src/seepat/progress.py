@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from time import sleep
@@ -121,6 +122,45 @@ def read_live_workflow_progress(config_path: Path) -> dict[str, object]:
                 "must be restarted once to publish audit progress."
             ),
         }
+    if record.get("status") == "running" and record.get("phase") == "preprocess videos":
+        job_index = int(record.get("job_index", 0)) - 1
+        if 0 <= job_index < len(settings.jobs):
+            job = settings.jobs[job_index]
+            pipeline_settings = load_pipeline_settings(
+                job.pipeline_config, PIPELINE_VERSION
+            )
+            summary = summarize_progress(
+                selected_manifest_rows(pipeline_settings),
+                pipeline_settings.preprocessing.output_dir / "cache",
+                pipeline_settings.cache_signature,
+            )
+            finished = int(summary["videos_finished"])
+            total = int(summary["videos_requested"])
+            report_updated_at = float(record.get("updated_at", time.time()))
+            elapsed = max(
+                float(record.get("elapsed_seconds", 0)),
+                time.time() - report_updated_at,
+            )
+            latest_result = summary.get("latest_result_at_utc")
+            updated_at = report_updated_at
+            if isinstance(latest_result, str):
+                try:
+                    updated_at = datetime.fromisoformat(latest_result).timestamp()
+                except ValueError:
+                    pass
+            record = {
+                **record,
+                "finished": finished,
+                "total": total,
+                "elapsed_seconds": round(elapsed, 2),
+                "updated_at": updated_at,
+                "eta_seconds": (
+                    round(elapsed * (total - finished) / finished, 2)
+                    if finished > 0 and total >= finished
+                    else None
+                ),
+                "progress_source": "preprocessing cache",
+            }
     return record
 
 

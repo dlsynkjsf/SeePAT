@@ -311,7 +311,11 @@ def test_workflow_job_runs_only_missing_stages(tmp_path: Path, monkeypatch) -> N
         lambda settings, path: False,
     )
 
-    def fake_pipeline(path: Path, retry_failed: bool = False) -> dict[str, object]:
+    def fake_pipeline(
+        path: Path,
+        retry_failed: bool = False,
+        progress=None,
+    ) -> dict[str, object]:
         calls.append("preprocessing")
         return {"videos_requested": 1}
 

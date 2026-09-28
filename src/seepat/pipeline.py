@@ -12,6 +12,7 @@ from seepat.artifacts import (
     stable_id,
 )
 from seepat.config import PipelineSettings, load_pipeline_settings
+from seepat.live_progress import ProgressCallback
 from seepat.preprocessing.alignment import MfaDockerAligner
 from seepat.preprocessing.face import MouthEventAnalyzer
 from seepat.preprocessing.transcription import WhisperTranscriber
@@ -153,6 +154,7 @@ def run_pipeline(
     limit: int | None = None,
     force: bool = False,
     retry_failed: bool = False,
+    progress: ProgressCallback | None = None,
 ) -> dict[str, object]:
     if limit is not None and limit < 1:
         raise ValueError("--limit must be at least 1")
@@ -167,6 +169,8 @@ def run_pipeline(
     cache_dir.mkdir(parents=True, exist_ok=True)
 
     manifest_rows = selected_manifest_rows(settings, limit=limit)
+    if progress is not None:
+        progress("preprocess videos", 0, len(manifest_rows), "")
 
     transcriber = WhisperTranscriber(
         model_name=preprocessing.whisper_model,
@@ -189,8 +193,10 @@ def run_pipeline(
             aligner=aligner,
             mouth_analyzer=mouth_analyzer,
         )
-        for manifest_row in manifest_rows:
+        for index, manifest_row in enumerate(manifest_rows):
             video_id = stable_id(manifest_row["file"])
+            if progress is not None:
+                progress("preprocess videos", index, len(manifest_rows), video_id)
             work_dir = cache_dir / video_id
             result_path = work_dir / "result.json"
             cached = None if force else _load_cached_result(
@@ -221,6 +227,8 @@ def run_pipeline(
             )
             video_reports.append(report)
             all_events.extend(events)
+            if progress is not None:
+                progress("preprocess videos", index + 1, len(manifest_rows), video_id)
 
     return _write_run_outputs(
         output_dir=output_dir,

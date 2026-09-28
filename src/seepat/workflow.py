@@ -486,6 +486,7 @@ def run_workflow_job(
         pipeline_summary = run_pipeline(
             job.pipeline_config,
             retry_failed=retry_failed,
+            **({"progress": progress} if progress is not None else {}),
         )
         preprocessing_action = "ran"
 
