@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
-from seepat.artifacts import stable_id
+from seepat.artifacts import atomic_write_json, file_sha256, stable_id
+from seepat.live_progress import live_progress_path
 from seepat.progress import (
     format_progress,
     format_workflow_progress,
+    read_live_workflow_progress,
     read_workflow_progress,
     summarize_progress,
 )
@@ -136,6 +139,60 @@ def test_read_workflow_progress_includes_model_jobs(tmp_path: Path, monkeypatch)
         "completed_epochs": 1,
         "requested_epochs": 2,
     }
+
+
+def test_read_live_progress_recovers_running_preprocessing_from_cache(
+    tmp_path: Path, monkeypatch
+) -> None:
+    config, report = tmp_path / "workflow.yaml", tmp_path / "summary.json"
+    config.write_text("jobs: []\n", encoding="utf-8")
+    pipeline_config = tmp_path / "pipeline.yaml"
+    pipeline_config.write_text("placeholder: true\n", encoding="utf-8")
+    job = WorkflowJob("prepare", pipeline_config, tmp_path / "manifest")
+    settings = WorkflowSettings((job,), (), report)
+    record = {
+        "config_sha256": file_sha256(config),
+        "status": "running",
+        "jobs_total": 1,
+        "job_index": 1,
+        "job": "prepare",
+        "phase": "preprocess videos",
+        "finished": 0,
+        "total": 0,
+        "elapsed_seconds": 0,
+        "updated_at": 100.0,
+    }
+    atomic_write_json(live_progress_path(report), record)
+    pipeline_settings = SimpleNamespace(
+        preprocessing=SimpleNamespace(output_dir=tmp_path),
+        cache_signature="signature",
+    )
+
+    monkeypatch.setattr("seepat.workflow.load_workflow_settings", lambda _: settings)
+    monkeypatch.setattr(
+        "seepat.progress.load_pipeline_settings",
+        lambda *_: pipeline_settings,
+    )
+    monkeypatch.setattr(
+        "seepat.progress.selected_manifest_rows",
+        lambda _: [{"file": "a.mp4"}, {"file": "b.mp4"}],
+    )
+    monkeypatch.setattr(
+        "seepat.progress.summarize_progress",
+        lambda *args: {
+            "videos_finished": 1,
+            "videos_requested": 2,
+        },
+    )
+    monkeypatch.setattr("seepat.progress.file_sha256", lambda _: file_sha256(config))
+    monkeypatch.setattr("seepat.progress.time.time", lambda: 112.0)
+
+    result = read_live_workflow_progress(config)
+
+    assert result["finished"] == 1
+    assert result["total"] == 2
+    assert result["elapsed_seconds"] == 12
+    assert result["progress_source"] == "preprocessing cache"
 
 
 def test_format_workflow_progress_is_compact() -> None:

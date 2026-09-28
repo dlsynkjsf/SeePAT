@@ -1,0 +1,17 @@
+# Inner Validation thresholds for the two new Phase-2 candidates.
+report: outputs/workflow_fusion_phase2_validation_summary.json
+
+decisions:
+  - &decision
+    name: phase2-partial-unfreeze-validation
+    validation_manifest: outputs/numerical_calibration/guarded_per_video_v3/events_val_calibrated.csv
+    source_manifest: data/manifests/val_subset1000.csv
+    checkpoint: outputs/training/fusion_phase2_v1/experiments/partial_unfreeze/checkpoint_best.pt
+    output_dir: outputs/decisions/fusion_phase2_v1/inner/partial_unfreeze
+    device: cuda
+    batch_size: 1
+
+  - <<: *decision
+    name: phase2-focal-validation
+    checkpoint: outputs/training/fusion_phase2_v1/experiments/focal/checkpoint_best.pt
+    output_dir: outputs/decisions/fusion_phase2_v1/inner/focal

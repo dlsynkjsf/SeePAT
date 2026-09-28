@@ -225,6 +225,36 @@ def test_preflight_batch_limits_must_be_paired_and_positive() -> None:
     with pytest.raises(ValueError, match="requires balanced_global"):
         TrainingOptions(positive_class_weight_ratio=10).validate()
 
+    with pytest.raises(ValueError, match="requires freeze_backbone"):
+        TrainingOptions(unfreeze_final_backbone_stages=True).validate()
+
+    with pytest.raises(ValueError, match="requires backbone_learning_rate"):
+        TrainingOptions(
+            freeze_backbone=True,
+            unfreeze_final_backbone_stages=True,
+        ).validate()
+
+    with pytest.raises(ValueError, match="requires final-stage unfreezing"):
+        TrainingOptions(backbone_learning_rate=1e-5).validate()
+
+
+def test_focal_loss_gamma_zero_matches_weighted_cross_entropy() -> None:
+    logits = torch.tensor([[0.2, 0.8], [0.7, 0.3]])
+    labels = torch.tensor([1, 0])
+    weights = torch.tensor([0.5, 5.0])
+
+    focal = train_module._FocalLoss(weights, gamma=0.0, reduction="none")(
+        logits,
+        labels,
+    )
+    expected = nn.functional.cross_entropy(
+        logits,
+        labels,
+        weight=weights,
+        reduction="none",
+    )
+    torch.testing.assert_close(focal, expected)
+
 
 @pytest.mark.parametrize("overflow_batches", [1, 2])
 def test_amp_overflow_counts_only_updates_and_rejects_empty_training(

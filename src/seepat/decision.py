@@ -19,6 +19,7 @@ class DecisionJob:
     project_root: Path = Path(".")
     device: str = "auto"
     batch_size: int = 1
+    threshold_artifact: Path | None = None
 
 
 def decision_stage_status(job: DecisionJob) -> dict[str, str]:
@@ -30,16 +31,30 @@ def decision_stage_status(job: DecisionJob) -> dict[str, str]:
 
     status = dict.fromkeys(names, "pending_or_stale")
     try:
-        _, provenance = evaluation_inputs(job.validation_manifest, job.checkpoint, "val")
-        threshold_path = job.output_dir / "threshold.json"
-        _load_threshold(None, threshold_path, provenance)
+        transfer = job.threshold_artifact is not None
+        contract, provenance = evaluation_inputs(
+            job.validation_manifest,
+            job.checkpoint,
+            "val",
+            validation_transfer=transfer,
+        )
+        threshold_path = job.threshold_artifact or job.output_dir / "threshold.json"
+        threshold_provenance = provenance
+        if transfer:
+            threshold_provenance = {
+                **provenance,
+                "validation_manifest_sha256": contract["validation_manifest_sha256"],
+            }
+        _load_threshold(None, threshold_path, threshold_provenance)
         status["threshold"] = "current"
         directory = job.output_dir / "verdict"
         evaluation = json.loads((directory / "evaluation.json").read_text(encoding="utf-8"))
         source_hash = file_sha256(job.source_manifest) if job.source_manifest else None
         if (
             evaluation.get("verdict_version") != VERDICT_VERSION
-            or evaluation.get("status") != "complete" or evaluation.get("mode") != "validation"
+            or evaluation.get("status") != "complete"
+            or evaluation.get("mode")
+            != ("outer_validation" if transfer else "validation")
             or evaluation.get("provenance") != provenance
             or evaluation.get("threshold", {}).get("artifact_sha256") != file_sha256(threshold_path)
             or (evaluation.get("source_manifest") or {}).get("sha256") != source_hash
@@ -68,7 +83,13 @@ def run_decision_job(job: DecisionJob, progress: ProgressCallback | None = None)
     from seepat.xai import generate_forensic_trace
 
     # Fail before writing anything if a preflight, foreign split or stale calibration is supplied.
-    evaluation_inputs(job.validation_manifest, job.checkpoint, "val")
+    transfer = job.threshold_artifact is not None
+    evaluation_inputs(
+        job.validation_manifest,
+        job.checkpoint,
+        "val",
+        validation_transfer=transfer,
+    )
     current = decision_stage_status(job)
     actions = {}
     for stage in ("threshold", "verdict", "explanation"):
@@ -84,12 +105,18 @@ def run_decision_job(job: DecisionJob, progress: ProgressCallback | None = None)
             "batch_size": job.batch_size, "progress": progress,
         }
         if stage == "threshold":
+            if transfer:
+                raise ValueError("The supplied frozen threshold artifact is stale or incompatible")
             select_threshold(output_path=job.output_dir / "threshold.json", **common)
         elif stage == "verdict":
             run_verdict(
                 output_dir=job.output_dir / "verdict", split="val",
                 source_manifest=job.source_manifest,
-                threshold_artifact=job.output_dir / "threshold.json", **common,
+                threshold_artifact=(
+                    job.threshold_artifact or job.output_dir / "threshold.json"
+                ),
+                validation_transfer=transfer,
+                **common,
             )
         else:
             generate_forensic_trace(job.output_dir / "verdict", job.output_dir / "explanation.json")

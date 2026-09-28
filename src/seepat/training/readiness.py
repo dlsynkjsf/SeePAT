@@ -9,7 +9,7 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from seepat.artifacts import read_csv_rows
+from seepat.artifacts import file_sha256, read_csv_rows
 
 if TYPE_CHECKING:
     from seepat.workflow import ModelTrainingJob
@@ -55,8 +55,23 @@ def audit_inputs(job: ModelTrainingJob) -> dict[str, object]:
         raise ValueError("Train and Validation event IDs overlap")
     if contracts and contracts[0] != contracts[1]:
         raise ValueError("Fusion inputs must share one frozen Train calibration")
-    return {"name": job.name, "status": "passed", "inputs": summaries,
-            "device": job.device, "pretrained": job.pretrained, "options": asdict(options)}
+    initial_checkpoint = None
+    if job.initialize_from is not None:
+        if not job.initialize_from.is_file():
+            raise FileNotFoundError(f"Initial checkpoint not found: {job.initialize_from}")
+        initial_checkpoint = {
+            "path": job.initialize_from.as_posix(),
+            "sha256": file_sha256(job.initialize_from),
+        }
+    return {
+        "name": job.name,
+        "status": "passed",
+        "inputs": summaries,
+        "initial_checkpoint": initial_checkpoint,
+        "device": job.device,
+        "pretrained": job.pretrained,
+        "options": asdict(options),
+    }
 
 
 def _finite(value: object) -> bool:

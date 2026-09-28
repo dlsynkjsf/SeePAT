@@ -58,6 +58,19 @@ def create_parser() -> ArgumentParser:
     canary.add_argument("--seed", type=int, default=20260824)
     canary.add_argument("--exclude-split", action="append", dest="excluded_splits")
 
+    cohort = commands.add_parser(
+        "sample-disjoint-cohort",
+        help="Create a deterministic AV++ cohort excluding existing manifests",
+    )
+    cohort.add_argument("--database", type=Path, required=True)
+    cohort.add_argument("--output", type=Path, required=True)
+    cohort.add_argument("--summary", type=Path, required=True)
+    cohort.add_argument("--split", default="val")
+    cohort.add_argument("--category", action="append", dest="categories")
+    cohort.add_argument("--per-category", type=int, default=250)
+    cohort.add_argument("--seed", type=int, default=20260928)
+    cohort.add_argument("--exclude-manifest", type=Path, action="append", required=True)
+
     extract = commands.add_parser(
         "extract-pilot", help="Extract only videos named by a pilot manifest"
     )
@@ -130,6 +143,23 @@ def main() -> None:
             per_category=args.per_category,
             seed=args.seed,
             excluded_splits=excluded_splits,
+        )
+        print(json.dumps(summary, indent=2))
+        return
+
+    if args.command == "sample-disjoint-cohort":
+        categories = args.categories or list(DEFAULT_CATEGORIES)
+        _, summary = sample_training_canary(
+            database_path=args.database,
+            output_path=args.output,
+            summary_path=args.summary,
+            split=args.split,
+            categories=categories,
+            per_category=args.per_category,
+            seed=args.seed,
+            excluded_splits=(),
+            excluded_manifests=args.exclude_manifest,
+            purpose="phase2_outer_development_cohort",
         )
         print(json.dumps(summary, indent=2))
         return

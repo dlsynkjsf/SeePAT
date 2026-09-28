@@ -1,0 +1,36 @@
+# Phase-2 outer-development cohort. This does not train a model.
+# Before this workflow, create and selectively extract the frozen manifest:
+#
+# ./.venv/Scripts/seepat-data.exe sample-disjoint-cohort \
+#   --database data/manifests/avpp_inventory.sqlite \
+#   --output data/manifests/phase2_val_outer1000.csv \
+#   --summary outputs/phase2_val_outer1000_sample_summary.json \
+#   --split val --per-category 250 --seed 20260928 \
+#   --exclude-manifest data/manifests/train_subset5000.csv \
+#   --exclude-manifest data/manifests/val_subset1000.csv
+#
+# ./.venv/Scripts/seepat-data.exe extract-pilot \
+#   --archive data/raw/avpp/val/val.zip.001 \
+#   --manifest data/manifests/phase2_val_outer1000.csv \
+#   --output-dir data/extracted/avpp/phase2-val-outer1000 \
+#   --report outputs/extract_phase2_val_outer1000.json
+
+report: outputs/workflow_phase2_cohort_summary.json
+
+jobs:
+  - name: phase2-val-outer1000
+    pipeline_config: configs/phase2_val_outer1000.yaml
+    manifest_output_dir: data/training/phase2-val-outer1000
+
+trace_augmentation:
+  - name: phase2-val-vild-augmentation
+    manifest: data/training/phase2-val-outer1000/events_val.csv
+    extracted_root: data/extracted/avpp/phase2-val-outer1000/val
+    output_dir: outputs/trace_augmentation/phase2_val_outer
+
+numerical_calibration:
+  name: phase2-frozen-vild-calibration
+  calibration: outputs/numerical_calibration/guarded_per_video_v3/calibration.json
+  score_manifests:
+    phase2_outer: outputs/trace_augmentation/phase2_val_outer/events_augmented.csv
+  output_dir: outputs/numerical_calibration/phase2_outer_v1

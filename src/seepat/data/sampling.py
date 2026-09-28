@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from hashlib import sha256
 from pathlib import Path
 
-from seepat.artifacts import atomic_write_csv, atomic_write_json
+from seepat.artifacts import atomic_write_csv, atomic_write_json, read_csv_rows
 from seepat.data.inventory import file_sha256
 
 CANARY_FIELDS = """
@@ -131,6 +131,8 @@ def sample_training_canary(
     per_category: int,
     seed: int,
     excluded_splits: Sequence[str] = ("val",),
+    excluded_manifests: Sequence[Path] = (),
+    purpose: str = "avpp_train_preprocessing_canary_not_full_training_set",
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
     if not database_path.is_file():
         raise FileNotFoundError(f"Inventory database not found: {database_path}")
@@ -146,10 +148,22 @@ def sample_training_canary(
     selected: list[dict[str, object]] = []
     used_source_groups: set[str] = set()
     excluded_source_groups: set[str] = set()
+    excluded_manifest_records: list[dict[str, object]] = []
     available_group_counts: dict[str, int] = {}
     metadata_rejections: dict[str, Counter[str]] = {}
 
     try:
+        for path in excluded_manifests:
+            if not path.is_file():
+                raise FileNotFoundError(f"Excluded manifest not found: {path}")
+            rows = read_csv_rows(path)
+            excluded_source_groups.update(
+                canonical_source_group(row.get("source_group") or row.get("original"), row.get("file"))
+                for row in rows
+            )
+            excluded_manifest_records.append(
+                {"path": path.as_posix(), "sha256": file_sha256(path), "rows": len(rows)}
+            )
         if excluded_splits:
             placeholders = ", ".join("?" for _ in excluded_splits)
             for row in connection.execute(
@@ -222,13 +236,14 @@ def sample_training_canary(
     atomic_write_csv(output_path, selected)
     category_counts = Counter(str(row["modify_type"]) for row in selected)
     summary: dict[str, object] = {
-        "purpose": "avpp_train_preprocessing_canary_not_full_training_set",
+        "purpose": purpose,
         "database": database_path.as_posix(),
         "split": split,
         "categories": list(categories),
         "per_category": per_category,
         "sampling_seed": seed,
         "excluded_splits": list(excluded_splits),
+        "excluded_manifests": excluded_manifest_records,
         "excluded_source_groups": len(excluded_source_groups),
         "available_source_groups_after_exclusions": available_group_counts,
         "metadata_row_rejections": {

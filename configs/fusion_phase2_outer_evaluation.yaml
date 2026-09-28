@@ -1,0 +1,29 @@
+# One-time outer-development comparison. Thresholds are frozen on inner Validation.
+report: outputs/workflow_fusion_phase2_outer_evaluation_summary.json
+
+decisions:
+  - &outer
+    name: phase2-ratio10-reference-outer
+    validation_manifest: &outer_events outputs/numerical_calibration/phase2_outer_v1/events_phase2_outer_calibrated.csv
+    source_manifest: &outer_source data/manifests/phase2_val_outer1000.csv
+    checkpoint: outputs/training/fusion_tuning_v1/experiments/ratio10/checkpoint_best.pt
+    threshold_artifact: outputs/decisions/fusion_tuning_v1/ratio10/threshold.json
+    output_dir: outputs/decisions/fusion_phase2_v1/outer/ratio10_reference
+    device: cuda
+    batch_size: 1
+
+  - <<: *outer
+    name: phase2-partial-unfreeze-outer
+    validation_manifest: *outer_events
+    source_manifest: *outer_source
+    checkpoint: outputs/training/fusion_phase2_v1/experiments/partial_unfreeze/checkpoint_best.pt
+    threshold_artifact: outputs/decisions/fusion_phase2_v1/inner/partial_unfreeze/threshold.json
+    output_dir: outputs/decisions/fusion_phase2_v1/outer/partial_unfreeze
+
+  - <<: *outer
+    name: phase2-focal-outer
+    validation_manifest: *outer_events
+    source_manifest: *outer_source
+    checkpoint: outputs/training/fusion_phase2_v1/experiments/focal/checkpoint_best.pt
+    threshold_artifact: outputs/decisions/fusion_phase2_v1/inner/focal/threshold.json
+    output_dir: outputs/decisions/fusion_phase2_v1/outer/focal

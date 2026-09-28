@@ -250,6 +250,7 @@ def evaluation_inputs(
     dataset_source: str = VALIDATION_SOURCE,
     sequence_length: int | None = None, image_size: int | None = None,
     engineering_preflight: bool = False,
+    validation_transfer: bool = False,
 ) -> tuple[dict[str, Any], dict[str, object]]:
     """Validate provenance before constructing a model or decoding any clip."""
     _validate_scope(split, dataset_source)
@@ -289,7 +290,7 @@ def evaluation_inputs(
         if requested is not None and requested != contract[key]:
             raise ValueError(f"Evaluation {key} differs from checkpoint")
     manifest_hash = file_sha256(manifest_path)
-    if contract.get("validation_manifest_sha256") != manifest_hash:
+    if not validation_transfer and contract.get("validation_manifest_sha256") != manifest_hash:
         raise ValueError("Evaluation manifest differs from the checkpoint's Validation manifest")
     fusion_inputs = None
     if model_name == FUSION_MODEL:
@@ -376,6 +377,7 @@ def run_verdict(
     calibration_summary: Path | None = None,
     dataset_source: str = VALIDATION_SOURCE,
     engineering_preflight: bool = False,
+    validation_transfer: bool = False,
     progress: ProgressCallback | None = None,
 ) -> dict[str, object]:
     if batch_size < 1:
@@ -389,11 +391,24 @@ def run_verdict(
 
     if threshold is None and threshold_artifact is None:
         raise ValueError("A frozen threshold is required")
+    if validation_transfer and (threshold_artifact is None or engineering_preflight):
+        raise ValueError("Validation transfer requires a frozen threshold artifact")
     contract, provenance = evaluation_inputs(
         manifest_path, checkpoint_path, split, dataset_source, sequence_length, image_size,
+        engineering_preflight, validation_transfer,
+    )
+    threshold_provenance = provenance
+    if validation_transfer:
+        threshold_provenance = {
+            **provenance,
+            "validation_manifest_sha256": contract["validation_manifest_sha256"],
+        }
+    threshold_record = _load_threshold(
+        threshold,
+        threshold_artifact,
+        threshold_provenance,
         engineering_preflight,
     )
-    threshold_record = _load_threshold(threshold, threshold_artifact, provenance, engineering_preflight)
     frozen_threshold = float(threshold_record["value"])
     protected = {p.resolve() for p in (manifest_path, checkpoint_path, threshold_artifact, source_manifest, calibration_summary) if p is not None}
     if any((output_dir / name).resolve() in protected for name in ("event_predictions.csv", "video_verdicts.csv", "evaluation.json")):
@@ -401,7 +416,7 @@ def run_verdict(
 
     dataset = _evaluation_dataset(manifest_path, project_root, contract)
     records = []
-    if threshold_record.get("predictions"):
+    if threshold_record.get("predictions") and not validation_transfer:
         records = read_csv_rows(Path(threshold_record["predictions"]["path"]))
         if [row["event_id"] for row in records] != [row["event_id"] for row in dataset.rows]:
             raise ValueError("Threshold prediction inventory does not match Validation events")
@@ -492,7 +507,11 @@ def run_verdict(
     atomic_write_csv(verdict_path, verdict_rows)
     summary: dict[str, object] = {
         "verdict_version": VERDICT_VERSION,
-        "mode": "engineering_preflight" if engineering_preflight else "validation",
+        "mode": (
+            "engineering_preflight"
+            if engineering_preflight
+            else "outer_validation" if validation_transfer else "validation"
+        ),
         "status": "complete",
         "generated_at_utc": datetime.now(UTC).isoformat(),
         "split": split,
@@ -551,6 +570,11 @@ def main() -> None:
     parser.add_argument("--split", default="val", help="Only AV++ val is currently enabled")
     parser.add_argument("--dataset-source", default=VALIDATION_SOURCE)
     parser.add_argument("--engineering-preflight", action="store_true")
+    parser.add_argument(
+        "--validation-transfer",
+        action="store_true",
+        help="Apply a frozen inner-Validation threshold to a disjoint AV++ cohort",
+    )
     parser.add_argument("--select-threshold", action="store_true", help="Fit threshold.json on Validation")
     parser.add_argument(
         "--source-manifest",
@@ -566,7 +590,12 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.select_threshold:
-        if args.threshold is not None or args.threshold_artifact or args.engineering_preflight:
+        if (
+            args.threshold is not None
+            or args.threshold_artifact
+            or args.engineering_preflight
+            or args.validation_transfer
+        ):
             parser.error("Threshold selection cannot use a supplied threshold or preflight mode")
         result = select_threshold(
             args.manifest, args.checkpoint, args.output_dir / "threshold.json",
@@ -592,6 +621,7 @@ def main() -> None:
         calibration_summary=args.calibration_summary,
         dataset_source=args.dataset_source,
         engineering_preflight=args.engineering_preflight,
+        validation_transfer=args.validation_transfer,
     )
     print(json.dumps(summary, indent=2))
 

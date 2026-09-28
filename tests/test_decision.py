@@ -214,6 +214,63 @@ def test_changed_checkpoint_invalidates_threshold_and_downstream(job):
     assert set(run_decision_job(job)["stages"].values()) == {"ran"}
 
 
+def test_frozen_threshold_transfers_to_disjoint_validation_cohort(
+    job,
+    tmp_path,
+    monkeypatch,
+):
+    _patch_builder(monkeypatch)
+    run_decision_job(job)
+    outer_dir = tmp_path / "outer"
+    outer_dir.mkdir()
+    outer_manifest = outer_dir / "events_val.csv"
+    atomic_write_csv(
+        outer_manifest,
+        [
+            _event_row(outer_dir, "val/c.mp4", "c1", class_id="0", modality="real"),
+            _event_row(
+                outer_dir,
+                "val/d.mp4",
+                "d1",
+                class_id="1",
+                modality="both_modified",
+            ),
+        ],
+    )
+    _seal_manifest(outer_manifest)
+    source = outer_dir / "source.csv"
+    atomic_write_csv(source, [{"file": name} for name in ("val/c.mp4", "val/d.mp4")])
+    transfer = DecisionJob(
+        "outer",
+        outer_manifest,
+        outer_dir / "decision",
+        job.checkpoint,
+        source,
+        outer_dir,
+        "cpu",
+        threshold_artifact=job.output_dir / "threshold.json",
+    )
+
+    result = run_decision_job(transfer)
+
+    assert result["stages"] == {
+        "threshold": "skipped",
+        "verdict": "ran",
+        "explanation": "ran",
+    }
+    evaluation = json.loads(
+        (transfer.output_dir / "verdict" / "evaluation.json").read_text()
+    )
+    assert evaluation["mode"] == "outer_validation"
+    assert evaluation["provenance"]["validation_manifest_sha256"] == file_sha256(
+        outer_manifest
+    )
+    assert evaluation["threshold"]["provenance"][
+        "validation_manifest_sha256"
+    ] == file_sha256(job.validation_manifest)
+    assert set(decision_stage_status(transfer).values()) == {"current"}
+
+
 @pytest.mark.parametrize("split", ["val", "train"])
 def test_external_adapter_cannot_relabel_test_as_development(tmp_path, split):
     from seepat.data.deepfake_eval import build_deepfake_eval_manifest

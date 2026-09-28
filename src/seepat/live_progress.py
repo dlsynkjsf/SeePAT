@@ -52,7 +52,10 @@ def format_live_progress(record: dict[str, object]) -> str:
     ]
     if record.get("current_item"):
         lines.append(f"  Current: {record['current_item']}")
-    lines.append(f"  Last update {age:.0f}s ago | source: workflow report")
+    lines.append(
+        f"  Last update {age:.0f}s ago | "
+        f"source: {record.get('progress_source', 'workflow report')}"
+    )
     if record.get("error"):
         lines.append(f"  {record['error']}")
     return "\n".join(lines)

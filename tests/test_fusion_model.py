@@ -32,10 +32,14 @@ class TinyFrameBackbone(nn.Module):
         return self.classifier(self.projection(frames.mean(dim=(2, 3))))
 
 
-def _tiny_model(freeze_backbone: bool = False) -> HybridFusionEventClassifier:
+def _tiny_model(
+    freeze_backbone: bool = False,
+    unfreeze_final_backbone_stages: bool = False,
+) -> HybridFusionEventClassifier:
     return HybridFusionEventClassifier(
         pretrained=False,
         freeze_backbone=freeze_backbone,
+        unfreeze_final_backbone_stages=unfreeze_final_backbone_stages,
         swin_backbone=TinySwinBackbone(),
         frame_backbone=TinyFrameBackbone(),
         evidence_hidden=8,
@@ -150,6 +154,34 @@ def test_frozen_fusion_backbones_leave_fusion_branch_trainable() -> None:
     assert all(parameter.requires_grad for parameter in model.fusion.parameters())
     assert all(parameter.requires_grad for parameter in model.classifier.parameters())
     assert 0 < counts["trainable"] < counts["total"]
+
+
+def test_partial_fusion_unfreezes_only_final_backbone_modules() -> None:
+    model = _tiny_model(
+        freeze_backbone=True,
+        unfreeze_final_backbone_stages=True,
+    ).train()
+
+    assert model.backbone.training is False
+    assert model.frame_backbone.training is False
+    assert model.trainable_backbone_modules
+    assert all(module.training for module in model.trainable_backbone_modules)
+    assert all(
+        parameter.requires_grad
+        for module in model.trainable_backbone_modules
+        for parameter in module.parameters()
+    )
+    logits = model(
+        torch.rand(1, 3, 4, 8, 8),
+        features=torch.zeros(1, EVIDENCE_WIDTH),
+        feature_mask=torch.ones(1, EVIDENCE_WIDTH, dtype=torch.bool),
+    )
+    logits.sum().backward()
+    assert all(
+        parameter.grad is not None
+        for module in model.trainable_backbone_modules
+        for parameter in module.parameters()
+    )
 
 
 def test_fusion_contract_metadata_defaults() -> None:

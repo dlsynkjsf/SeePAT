@@ -77,6 +77,49 @@ def test_fusion_tuning_profiles_freeze_three_candidates():
         assert experiment.readiness_dir == preflight.output_dir
 
 
+def test_phase2_profiles_freeze_two_new_fits_and_outer_threshold_transfer():
+    cohort = load_workflow_settings(ROOT / "configs/phase2_cohort.yaml")
+    readiness = load_workflow_settings(ROOT / "configs/fusion_phase2_readiness.yaml")
+    experiments = load_workflow_settings(ROOT / "configs/fusion_phase2.yaml")
+    inner = load_workflow_settings(ROOT / "configs/fusion_phase2_validation.yaml")
+    outer = load_workflow_settings(ROOT / "configs/fusion_phase2_outer_evaluation.yaml")
+
+    assert len(cohort.jobs) == len(cohort.trace_augmentation_jobs) == 1
+    calibration = cohort.numerical_calibration_jobs[0]
+    assert calibration.train_manifest is None
+    assert calibration.calibration == Path(
+        "outputs/numerical_calibration/guarded_per_video_v3/calibration.json"
+    )
+    assert len(readiness.model_training_jobs) == len(experiments.model_training_jobs) == 2
+    assert len(inner.decision_jobs) == 2
+    assert len(outer.decision_jobs) == 3
+    assert all(job.threshold_artifact is not None for job in outer.decision_jobs)
+    for preflight, experiment in zip(
+        readiness.model_training_jobs,
+        experiments.model_training_jobs,
+        strict=True,
+    ):
+        left = TrainingOptions(**preflight.options)
+        right = TrainingOptions(**experiment.options)
+        left.validate()
+        right.validate()
+        assert preflight.initialize_from == experiment.initialize_from
+        assert experiment.readiness_dir == preflight.output_dir
+        assert replace(
+            left,
+            epochs=10,
+            max_train_batches=None,
+            max_validation_batches=None,
+        ) == right
+    partial, focal = (TrainingOptions(**job.options) for job in experiments.model_training_jobs)
+    assert partial.unfreeze_final_backbone_stages
+    assert partial.backbone_learning_rate == 1e-5
+    assert partial.loss_function == "cross_entropy"
+    assert not focal.unfreeze_final_backbone_stages
+    assert focal.backbone_learning_rate is None
+    assert focal.loss_function == "focal" and focal.focal_gamma == 2.0
+
+
 def test_profile_selection_and_live_tracker_notice_profile_changes(tmp_path):
     profile = tmp_path / "training.yaml"
     profile.write_text((ROOT / "configs/training_readiness.yaml").read_text(), encoding="utf-8")

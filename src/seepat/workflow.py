@@ -50,17 +50,19 @@ class ModelTrainingJob:
     options: dict[str, object]
     model: str = "swin3d_b"
     readiness_dir: Path | None = None
+    initialize_from: Path | None = None
 
 
 @dataclass(frozen=True)
 class NumericalCalibrationJob:
     name: str
-    train_manifest: Path
+    train_manifest: Path | None
     score_manifests: tuple[tuple[str, Path], ...]
     output_dir: Path
     min_video_reference_frames: int = 16
     isolation_trees: int = 100
     random_seed: int = 20260908
+    calibration: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -163,6 +165,11 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
                 options={str(key): value for key, value in options.items()},
                 model=model,
                 readiness_dir=Path(training["readiness_dir"]) if training.get("readiness_dir") else None,
+                initialize_from=(
+                    Path(training["initialize_from"])
+                    if training.get("initialize_from")
+                    else None
+                ),
             )
         except KeyError as error:
             raise ValueError(
@@ -216,7 +223,11 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
         try:
             calibration_job = NumericalCalibrationJob(
                 name=str(calibration.get("name", "numerical-calibration")).strip(),
-                train_manifest=Path(str(calibration["train_manifest"])),
+                train_manifest=(
+                    Path(str(calibration["train_manifest"]))
+                    if calibration.get("train_manifest")
+                    else None
+                ),
                 score_manifests=score_manifests,
                 output_dir=Path(str(calibration["output_dir"])),
                 min_video_reference_frames=int(
@@ -224,6 +235,11 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
                 ),
                 isolation_trees=int(calibration.get("isolation_trees", 100)),
                 random_seed=int(calibration.get("random_seed", 20260908)),
+                calibration=(
+                    Path(str(calibration["calibration"]))
+                    if calibration.get("calibration")
+                    else None
+                ),
             )
         except KeyError as error:
             raise ValueError(
@@ -231,6 +247,10 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
             ) from error
         if not calibration_job.name:
             raise ValueError("Numerical calibration configuration has no name")
+        if (calibration_job.train_manifest is None) == (calibration_job.calibration is None):
+            raise ValueError(
+                "Numerical calibration requires exactly one of train_manifest or calibration"
+            )
         if calibration_job.name in calibration_names:
             raise ValueError(
                 f"Duplicate numerical calibration job name: {calibration_job.name}"
@@ -270,6 +290,11 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
             source_manifest=Path(item["source_manifest"]) if item.get("source_manifest") else None,
             project_root=Path(item.get("project_root", ".")), device=str(item.get("device", "auto")),
             batch_size=int(item.get("batch_size", 1)),
+            threshold_artifact=(
+                Path(item["threshold_artifact"])
+                if item.get("threshold_artifact")
+                else None
+            ),
         )
         if not decision.name or decision.batch_size < 1 or any(
             old.name == decision.name or old.output_dir == decision.output_dir for old in decision_jobs
@@ -461,6 +486,7 @@ def run_workflow_job(
         pipeline_summary = run_pipeline(
             job.pipeline_config,
             retry_failed=retry_failed,
+            **({"progress": progress} if progress is not None else {}),
         )
         preprocessing_action = "ran"
 
@@ -542,6 +568,10 @@ def _model_training_configuration_matches(
         expected_options = asdict(options)
         recorded_options.setdefault("positive_class_weight_ratio", None)
         recorded_options.setdefault("selection_metric", VIDEO_F1_SELECTION)
+        recorded_options.setdefault("unfreeze_final_backbone_stages", False)
+        recorded_options.setdefault("backbone_learning_rate", None)
+        recorded_options.setdefault("loss_function", "cross_entropy")
+        recorded_options.setdefault("focal_gamma", 2.0)
         recorded_options.pop("epochs", None)
         expected_options.pop("epochs")
         if job.device != "auto" and run_record.get("device") != job.device:
@@ -560,6 +590,15 @@ def _model_training_configuration_matches(
             and contract.get("model") == model_contract_name(job.model)
             and contract.get("model_name", SWIN_BASE_MODEL) == job.model
             and contract.get("pretrained") == job.pretrained
+            and contract.get("initial_checkpoint")
+            == (
+                {
+                    "path": job.initialize_from.as_posix(),
+                    "sha256": _sha256(job.initialize_from),
+                }
+                if job.initialize_from is not None
+                else None
+            )
             and contract.get("train_manifest_sha256") == _sha256(job.train_manifest)
             and contract.get("validation_manifest_sha256")
             == _sha256(job.validation_manifest)
@@ -613,6 +652,7 @@ def _run_model_training(
         pretrained=job.pretrained,
         model_name=job.model,
         resume_from=resume_from,
+        initialize_from=job.initialize_from,
         progress=progress,
     )
 
@@ -655,8 +695,19 @@ def run_model_training_job(
 
 
 def numerical_calibration_outputs_are_current(job: NumericalCalibrationJob) -> bool:
-    from seepat.training.calibration import CalibrationOptions, calibration_outputs_are_current
+    from seepat.training.calibration import (
+        CalibrationOptions,
+        calibration_outputs_are_current,
+        score_only_outputs_are_current,
+    )
 
+    if job.calibration is not None:
+        return score_only_outputs_are_current(
+            job.calibration,
+            dict(job.score_manifests),
+            job.output_dir,
+        )
+    assert job.train_manifest is not None
     return calibration_outputs_are_current(
         job.train_manifest, dict(job.score_manifests), job.output_dir,
         CalibrationOptions(job.min_video_reference_frames, job.isolation_trees, job.random_seed),
@@ -675,8 +726,21 @@ def run_numerical_calibration_job(
             "action": "skipped",
             "summary": _read_json(job.output_dir / "summary.json"),
         }
-    from seepat.training.calibration import CalibrationOptions, fit_and_score_calibration
+    from seepat.training.calibration import (
+        CalibrationOptions,
+        fit_and_score_calibration,
+        score_manifests_with_calibration,
+    )
 
+    if job.calibration is not None:
+        print(f"[{job.name}] numerical calibration: frozen Train parameters, new input forests")
+        summary = score_manifests_with_calibration(
+            calibration_path=job.calibration,
+            score_manifests=dict(job.score_manifests),
+            output_dir=job.output_dir,
+        )
+        return {"name": job.name, "action": "ran", "summary": summary}
+    assert job.train_manifest is not None
     print(f"[{job.name}] numerical calibration: Train regression and independent input-video forests")
     summary = fit_and_score_calibration(
         train_manifest=job.train_manifest,
