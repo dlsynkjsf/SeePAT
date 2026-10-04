@@ -30,6 +30,16 @@ from seepat.training.metrics import (
     binary_classification_metrics,
     choose_balanced_accuracy_threshold,
 )
+from seepat.training.video_objective import (
+    VIDEO_MAX,
+    VIDEO_SUPERVISION_CONTRACT,
+    VideoBag,
+    scored_video_bags,
+    select_video_bags,
+    train_video_epoch,
+    video_bags,
+    video_loader,
+)
 
 SWIN_BASE_MODEL = "swin3d_b"
 CNN_TEMPORAL_MODEL = "efficientnet_v2_s_tempcnn"
@@ -132,6 +142,7 @@ class TrainingOptions:
     positive_class_weight_ratio: float | None = None
     loss_function: str = "cross_entropy"
     focal_gamma: float = 2.0
+    supervision: str = "event"
     selection_metric: str = VIDEO_F1_SELECTION
     early_stopping_patience: int = 3
     max_train_batches: int | None = None
@@ -180,6 +191,17 @@ class TrainingOptions:
             raise ValueError("loss_function must be 'cross_entropy' or 'focal'")
         if self.focal_gamma < 0:
             raise ValueError("focal_gamma must not be negative")
+        if self.supervision not in {"event", VIDEO_MAX}:
+            raise ValueError("supervision must be 'event' or 'video_max'")
+        if self.supervision == VIDEO_MAX and (
+            self.batch_size != 1 or self.amp or not self.freeze_backbone
+            or self.unfreeze_final_backbone_stages or self.class_weighting != "balanced_global"
+            or self.positive_class_weight_ratio is not None or self.loss_function != "cross_entropy"
+        ):
+            raise ValueError(
+                "video_max requires batch size one, FP32, frozen encoders, "
+                "balanced_global video weights, no positive ratio override and cross_entropy"
+            )
         if self.selection_metric not in {
             VIDEO_F1_SELECTION,
             VIDEO_BALANCED_ACCURACY_SELECTION,
@@ -195,6 +217,8 @@ class TrainingOptions:
             )
         if any(value is not None and value < 1 for value in batch_limits):
             raise ValueError("Preflight batch limits must be positive")
+        if self.supervision == VIDEO_MAX and any(value == 1 for value in batch_limits):
+            raise ValueError("Video readiness needs at least two complete videos per split")
 
 
 def source_group_overlap(
@@ -370,6 +394,7 @@ def _evaluate(
     progress: ProgressCallback | None = None,
     phase: str = "validate model",
     selection_metric: str = VIDEO_F1_SELECTION,
+    video_plan: list[VideoBag] | None = None,
 ) -> dict[str, object]:
     model.eval()
     loss_sum = 0.0
@@ -379,9 +404,27 @@ def _evaluate(
     video_ids: list[str] = []
     video_labels: list[int] = []
     batch_count = min(len(loader), max_batches) if max_batches is not None else len(loader)
+    if video_plan is not None:
+        if amp_enabled or max_batches is not None:
+            raise ValueError("Complete-video validation cannot use AMP or truncate event batches")
+        batch_count = len(video_plan)
 
     with torch.inference_mode():
-        for index, batch in enumerate(islice(loader, batch_count)):
+        if video_plan is not None:
+            for bag, scored in zip(video_plan, scored_video_bags(
+                model, loader, video_plan, device, _forward_logits, progress, phase,
+            ), strict=True):
+                loss = loss_function(scored["logits"], scored["label"]).mean()
+                if not torch.isfinite(loss).item():
+                    raise FloatingPointError("Validation video loss is not finite")
+                loss_sum += float(loss.item())
+                labels = scored["event_labels"]
+                event_count += len(labels)
+                event_labels.extend(labels)
+                event_probabilities.extend(scored["event_probabilities"])
+                video_ids.extend([bag.video_id] * len(labels))
+                video_labels.extend([bag.label] * len(labels))
+        for index, batch in enumerate(islice(loader, batch_count) if video_plan is None else ()):
             if progress is not None:
                 progress(phase, index, batch_count, str(batch["video_id"][0]))
             videos = batch["video"].to(device, non_blocking=True)
@@ -437,7 +480,7 @@ def _evaluate(
             "threshold": 0.5,
         }
     return {
-        "loss": loss_sum / event_count,
+        "loss": loss_sum / (len(video_plan) if video_plan is not None else event_count),
         "batches": batch_count,
         "events_processed": event_count,
         "events": binary_classification_metrics(event_labels, event_probabilities),
@@ -445,6 +488,11 @@ def _evaluate(
         "selection": selection,
         "videos_at_selection_threshold": selected_video_metrics,
         "video_aggregation": "maximum event fake probability",
+        **({"loss_unit": "video", "complete_video_bags": True,
+            "videos_processed": len(video_plan),
+            "video_bags": [{"video_id": bag.video_id, "label": bag.label,
+                            "events": len(bag.indices)} for bag in video_plan]}
+           if video_plan is not None else {}),
     }
 
 
@@ -530,6 +578,8 @@ def _print_epoch_summary(
     balanced_accuracy = (float(videos["recall"]) + float(videos["specificity"])) / 2
     print("\n" + "=" * 72)
     print(f"EPOCH {epoch}/{epochs}  |  {'NEW BEST' if improved else 'no improvement'}")
+    if validation.get("loss_unit") == "video":
+        print("Objective: complete-video maximum | event metrics are diagnostic, not localization")
     print(
         f"Updates {updates:,}  |  skipped {skipped:,}  |  "
         f"train loss {train_loss:.6f}  |  val loss {float(validation['loss']):.6f}"
@@ -586,9 +636,15 @@ def train_model(
     if overlapping_groups:
         examples = ", ".join(sorted(overlapping_groups)[:5])
         raise ValueError(f"Source-group leakage between train and validation: {examples}")
+    expected_supervision = VIDEO_SUPERVISION_CONTRACT if options.supervision == VIDEO_MAX else None
+    if resume_contract.get("supervision") is not None and resume_contract["supervision"] != expected_supervision:
+        raise ValueError("Declared supervision contract differs from training options")
 
     resume_contract = {
         **resume_contract,
+        **({"supervision": dict(VIDEO_SUPERVISION_CONTRACT)}
+           if options.supervision == VIDEO_MAX else {}),
+        **({"seed": options.seed} if options.supervision == VIDEO_MAX else {}),
         "optimizer": {
             "name": "AdamW",
             "learning_rate": options.learning_rate,
@@ -641,9 +697,15 @@ def train_model(
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
+    train_bags = video_bags(train_rows) if options.supervision == VIDEO_MAX else None
+    validation_bags = video_bags(validation_rows) if options.supervision == VIDEO_MAX else None
+    weighting_rows = (
+        [{"class_id": str(bag.label)} for bag in train_bags]
+        if train_bags is not None else train_rows
+    )
     class_weights = (
         _balanced_class_weights(
-            train_rows,
+            weighting_rows,
             device,
             positive_ratio=options.positive_class_weight_ratio,
         )
@@ -711,6 +773,9 @@ def train_model(
     validation_batches_per_epoch = (
         len(validation_dataset) + options.batch_size - 1
     ) // options.batch_size
+    if train_bags is not None:
+        train_batches_per_epoch = len(train_bags)
+        validation_batches_per_epoch = len(validation_bags)
     if options.max_train_batches is not None:
         train_batches_per_epoch = min(train_batches_per_epoch, options.max_train_batches)
     if options.max_validation_batches is not None:
@@ -745,9 +810,12 @@ def train_model(
         "skipped_optimizer_steps": 0,
         "data": {
             "preflight_sampling": (
-                "balanced_events" if limited_run and options.class_weighting == "balanced_global"
+                "balanced_complete_videos" if limited_run and train_bags is not None
+                else "balanced_events" if limited_run and options.class_weighting == "balanced_global"
                 else "original_loader_order"
             ),
+            **({"batch_unit": "complete_video", "train_videos": len(train_bags),
+                "validation_videos": len(validation_bags)} if train_bags is not None else {}),
             "train_events": len(train_dataset),
             "validation_events": len(validation_dataset),
             "train_source_groups": len({row["source_group"] for row in train_rows}),
@@ -769,12 +837,20 @@ def train_model(
     if limited_run:
         print(
             "Engineering preflight: "
-            f"{train_batches_per_epoch} Train batches and "
-            f"{validation_batches_per_epoch} Validation batches per epoch"
+            f"{train_batches_per_epoch} Train and {validation_batches_per_epoch} Validation "
+            f"{'complete videos' if train_bags is not None else 'batches'} per epoch"
         )
+    if train_bags is not None:
+        print("Video-aware training: one weighted loss per complete video; event scores are not localization.")
 
     try:
-        validation_loader = _loader(
+        validation_plan = (
+            select_video_bags(validation_bags, options.seed, False, options.max_validation_batches)
+            if validation_bags is not None else None
+        )
+        validation_loader = video_loader(
+            validation_dataset, validation_plan, options.workers, device, options.seed,
+        ) if validation_plan is not None else _loader(
             validation_dataset,
             options.batch_size,
             options.workers,
@@ -789,7 +865,13 @@ def train_model(
             ),
         )
         for epoch in range(start_epoch, options.epochs + 1):
-            train_loader = _loader(
+            train_plan = (
+                select_video_bags(train_bags, options.seed + epoch, True, options.max_train_batches)
+                if train_bags is not None else None
+            )
+            train_loader = video_loader(
+                train_dataset, train_plan, options.workers, device, options.seed + epoch,
+            ) if train_plan is not None else _loader(
                 train_dataset,
                 options.batch_size,
                 options.workers,
@@ -811,9 +893,29 @@ def train_model(
             epoch_skipped_steps = 0
             train_labels: list[int] = []
             train_probabilities: list[float] = []
+            video_train = None
+            if train_plan is not None:
+                video_train = train_video_epoch(
+                    model, train_loader, train_plan, device, _forward_logits, loss_function,
+                    optimizer, options.gradient_accumulation_steps, trainable_parameters,
+                    progress, f"train videos epoch {epoch}/{options.epochs}",
+                )
+                batch = video_train.pop("first_batch")
+                if evidence_audit is not None and "first_train_batch" not in run_record["data"]:
+                    run_record["data"]["first_train_batch"] = {
+                        "video_shape": list(batch["video"].shape),
+                        "frame_mask_shape": list(batch["frame_mask"].shape),
+                        "evidence_shape": list(batch["evidence_features"].shape),
+                        "evidence_mask": batch["evidence_feature_mask"].tolist(),
+                    }
+                updates = video_train.pop("optimizer_steps")
+                if updates != global_step - epoch_start_step:
+                    raise RuntimeError("Video optimizer update counts disagree")
+                run_record["optimizer_steps"] += updates
+                event_count = video_train["events_processed"]
 
             for batch_index, batch in enumerate(
-                islice(train_loader, train_batches_per_epoch),
+                islice(train_loader, train_batches_per_epoch) if train_plan is None else (),
                 start=1,
             ):
                 if progress is not None:
@@ -872,8 +974,10 @@ def train_model(
                     F.softmax(logits.detach().float(), dim=1)[:, 1].cpu().tolist()
                 )
             processed_train_events += event_count
+            train_loss = video_train["loss"] if video_train is not None else loss_sum / event_count
             if progress is not None:
-                progress(f"train epoch {epoch}/{options.epochs}", train_batches_per_epoch,
+                train_phase = "train videos epoch" if train_plan is not None else "train epoch"
+                progress(f"{train_phase} {epoch}/{options.epochs}", train_batches_per_epoch,
                          train_batches_per_epoch, "")
 
             epoch_optimizer_steps = global_step - epoch_start_step
@@ -891,10 +995,11 @@ def train_model(
                 loss_function,
                 device,
                 amp_enabled,
-                max_batches=options.max_validation_batches,
+                max_batches=options.max_validation_batches if validation_plan is None else None,
                 progress=progress,
                 phase=f"validate epoch {epoch}/{options.epochs}",
                 selection_metric=options.selection_metric,
+                video_plan=validation_plan,
             )
             processed_validation_events += int(validation["events_processed"])
             epoch_record: dict[str, object] = {
@@ -904,8 +1009,8 @@ def train_model(
                 "skipped_optimizer_steps": epoch_skipped_steps,
                 "learning_rate": optimizer.param_groups[0]["lr"],
                 "learning_rates": [group["lr"] for group in optimizer.param_groups],
-                "train": {
-                    "loss": loss_sum / event_count,
+                "train": video_train if video_train is not None else {
+                    "loss": train_loss,
                     "batches": train_batches_per_epoch,
                     "events_processed": event_count,
                     "events": binary_classification_metrics(
@@ -919,8 +1024,8 @@ def train_model(
             if limited_run:
                 print(
                     f"Epoch {epoch}/{options.epochs}: "
-                    f"{train_batches_per_epoch} Train batches and "
-                    f"{validation['batches']} Validation batches complete"
+                    f"{train_batches_per_epoch} Train and {validation['batches']} Validation "
+                    f"{'complete videos' if train_plan is not None else 'batches'} complete"
                 )
             current_selection_value = float(validation["selection"]["value"])  # type: ignore[index]
             current_selection_fpr = float(  # type: ignore[index]
@@ -947,7 +1052,7 @@ def train_model(
                 options.epochs,
                 epoch_optimizer_steps,
                 epoch_skipped_steps,
-                loss_sum / event_count,
+                train_loss,
                 validation,
                 improved,
             )
@@ -1111,6 +1216,9 @@ def train_from_manifests(
     initialize_from: Path | None = None,
     progress: ProgressCallback | None = None,
 ) -> dict[str, object]:
+    options.validate()
+    if options.supervision == VIDEO_MAX and model_name != FUSION_MODEL:
+        raise ValueError("Production video_max supervision is supported only by full fusion")
     device = _device(device_name)
     torch.hub.set_dir(str(project_root / ".cache" / "torch"))
     train_dataset = MouthEventDataset(
@@ -1155,6 +1263,9 @@ def train_from_manifests(
         "evidence_fields": list(getattr(model, "evidence_fields", ())),
         "train_manifest_sha256": _sha256(train_manifest),
         "validation_manifest_sha256": _sha256(validation_manifest),
+        **({"supervision": dict(VIDEO_SUPERVISION_CONTRACT)}
+           if options.supervision == VIDEO_MAX else {}),
+        **({"seed": options.seed} if options.supervision == VIDEO_MAX else {}),
     }
     if options.positive_class_weight_ratio is not None:
         resume_contract["positive_class_weight_ratio"] = options.positive_class_weight_ratio
@@ -1239,6 +1350,7 @@ def main() -> None:
         default="cross_entropy",
     )
     parser.add_argument("--focal-gamma", type=float, default=2.0)
+    parser.add_argument("--supervision", choices=("event", VIDEO_MAX), default="event")
     parser.add_argument(
         "--selection-metric",
         choices=(VIDEO_F1_SELECTION, VIDEO_BALANCED_ACCURACY_SELECTION),
@@ -1264,6 +1376,7 @@ def main() -> None:
         positive_class_weight_ratio=args.positive_class_weight_ratio,
         loss_function=args.loss_function,
         focal_gamma=args.focal_gamma,
+        supervision=args.supervision,
         selection_metric=args.selection_metric,
         early_stopping_patience=args.early_stopping_patience,
         max_train_batches=args.max_train_batches,

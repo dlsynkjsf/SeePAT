@@ -1,0 +1,38 @@
+# One new fit only, initialized from focal with reset optimizer.
+# One batch/loss/accumulation unit is a complete video; clips stream individually.
+report: outputs/workflow_fusion_phase3_summary.json
+
+model_training:
+  - name: phase3-video-max
+    model: swin3d_b_vild_fusion
+    train_manifest: outputs/numerical_calibration/guarded_per_video_v3/events_train_calibrated.csv
+    validation_manifest: outputs/numerical_calibration/guarded_per_video_v3/events_val_calibrated.csv
+    initialize_from: outputs/training/fusion_phase2_v1/experiments/focal/checkpoint_best.pt
+    output_dir: outputs/training/fusion_phase3_v1/experiments/video_max
+    readiness_dir: outputs/training/fusion_phase3_v1/readiness/video_max
+    project_root: .
+    device: cuda
+    pretrained: true
+    options:
+      epochs: 10
+      batch_size: 1
+      workers: 0
+      learning_rate: 0.0001
+      weight_decay: 0.01
+      gradient_accumulation_steps: 4
+      sequence_length: 16
+      image_size: 224
+      seed: 20260928
+      amp: false
+      freeze_backbone: true
+      unfreeze_final_backbone_stages: false
+      backbone_learning_rate: null
+      supervision: video_max
+      class_weighting: balanced_global
+      positive_class_weight_ratio: null
+      loss_function: cross_entropy
+      focal_gamma: 2.0
+      selection_metric: validation_video_balanced_accuracy
+      early_stopping_patience: 3
+      max_train_batches: null
+      max_validation_batches: null

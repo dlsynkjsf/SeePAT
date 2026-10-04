@@ -176,6 +176,8 @@ def build_evidence_bundle(
         "split": evaluation.get("split"),
         "threshold": evaluation.get("threshold"),
         "aggregation": evaluation.get("aggregation"),
+        **({"score_interpretation": evaluation["supervision"]["event_score_semantics"]}
+           if evaluation.get("supervision") else {}),
         "videos_scored": sum(row["verdict"] != "not_evaluated" for row in verdict_rows),
         "videos_requested": len(verdict_rows),
         "videos_not_evaluated": sum(row["verdict"] == "not_evaluated" for row in verdict_rows),
@@ -208,6 +210,13 @@ def render_evidence_summary(bundle: dict[str, object]) -> str:
         f"{bundle.get('missing_evidence_values')} missing evidence values)"
     )
     lines.append("")
+    if bundle.get("score_interpretation"):
+        lines.append(
+            "Video-supervised event scores are evidence contributions to the video verdict, "
+            "not probabilities of localized phoneme manipulation. The highest-scoring event "
+            "is not a verified manipulated interval."
+        )
+        lines.append("")
     videos = bundle.get("videos")
     if not isinstance(videos, list) or not videos:
         lines.append("No evaluated videos were available.")
@@ -238,7 +247,8 @@ def render_evidence_summary(bundle: dict[str, object]) -> str:
                 )
                 lines.append(
                     f"- Event {event.get('event_id')} (/{event.get('phoneme')}/): "
-                    f"p(manipulated)={event.get('manipulated_probability')}"
+                    + ("video evidence score=" if bundle.get("score_interpretation") else "p(manipulated)=")
+                    + str(event.get("manipulated_probability"))
                     + (f"; {detail}" if detail else "; no calibrated evidence available")
                 )
                 if event.get("missing_fields"):
@@ -257,7 +267,14 @@ def build_prompts(bundle: dict[str, object]) -> tuple[str, str]:
         + json.dumps(bundle, indent=2, sort_keys=True)
         + "\n\nWrite the forensic trace for the most relevant videos."
     )
-    return SYSTEM_GROUNDING_RULES, user_prompt
+    grounding = SYSTEM_GROUNDING_RULES
+    if bundle.get("score_interpretation"):
+        grounding += (
+            " This model was supervised on complete video labels. Event scores are video "
+            "evidence contributions, not verified probabilities that a phoneme/interval is "
+            "manipulated. Do not claim temporal localization from the highest-scoring event."
+        )
+    return grounding, user_prompt
 
 
 class OpenAICompatibleClient:

@@ -1,0 +1,21 @@
+# Fresh development cohort. Sample/extract the frozen manifest before this workflow.
+# The original Train calibration is reused; this workflow never trains a model.
+report: outputs/workflow_phase3_cohort_summary.json
+
+jobs:
+  - name: phase3-val-outer1000
+    pipeline_config: configs/phase3_val_outer1000.yaml
+    manifest_output_dir: data/training/phase3-val-outer1000
+
+trace_augmentation:
+  - name: phase3-val-vild-augmentation
+    manifest: data/training/phase3-val-outer1000/events_val.csv
+    extracted_root: data/extracted/avpp/phase3-val-outer1000/val
+    output_dir: outputs/trace_augmentation/phase3_val_outer
+
+numerical_calibration:
+  name: phase3-frozen-vild-calibration
+  calibration: outputs/numerical_calibration/guarded_per_video_v3/calibration.json
+  score_manifests:
+    phase3_outer: outputs/trace_augmentation/phase3_val_outer/events_augmented.csv
+  output_dir: outputs/numerical_calibration/phase3_outer_v1

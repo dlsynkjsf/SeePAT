@@ -1,0 +1,20 @@
+# One fresh-cohort comparison, only after checkpoints and inner thresholds freeze.
+# Primary video BA; lower FPR exact tie; exact BA/FPR tie retains focal reference.
+report: outputs/workflow_fusion_phase3_outer_evaluation_summary.json
+
+decisions:
+  - &outer
+    name: phase3-focal-reference-outer
+    validation_manifest: outputs/numerical_calibration/phase3_outer_v1/events_phase3_outer_calibrated.csv
+    source_manifest: data/manifests/phase3_val_outer1000.csv
+    checkpoint: outputs/training/fusion_phase2_v1/experiments/focal/checkpoint_best.pt
+    threshold_artifact: outputs/decisions/fusion_phase2_v1/inner/focal/threshold.json
+    output_dir: outputs/decisions/fusion_phase3_v1/outer/focal_reference
+    device: cuda
+    batch_size: 1
+
+  - <<: *outer
+    name: phase3-video-max-outer
+    checkpoint: outputs/training/fusion_phase3_v1/experiments/video_max/checkpoint_best.pt
+    threshold_artifact: outputs/decisions/fusion_phase3_v1/inner/video_max/threshold.json
+    output_dir: outputs/decisions/fusion_phase3_v1/outer/video_max

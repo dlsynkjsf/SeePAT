@@ -1,0 +1,11 @@
+# Only the new candidate's inner threshold; focal's threshold stays unchanged.
+report: outputs/workflow_fusion_phase3_validation_summary.json
+
+decisions:
+  - name: phase3-video-max-validation
+    validation_manifest: outputs/numerical_calibration/guarded_per_video_v3/events_val_calibrated.csv
+    source_manifest: data/manifests/val_subset1000.csv
+    checkpoint: outputs/training/fusion_phase3_v1/experiments/video_max/checkpoint_best.pt
+    output_dir: outputs/decisions/fusion_phase3_v1/inner/video_max
+    device: cuda
+    batch_size: 1

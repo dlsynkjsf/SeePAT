@@ -45,6 +45,7 @@ from seepat.training.metrics import (
     choose_balanced_accuracy_threshold,
 )
 from seepat.training.train import FUSION_MODEL, build_event_classifier, training_version_for_model
+from seepat.training.video_objective import VIDEO_MAX, VIDEO_SUPERVISION_CONTRACT
 
 VERDICT_VERSION = "verdict-v2"
 THRESHOLD_VERSION = "threshold-v2"
@@ -84,6 +85,7 @@ def load_evaluation_model(
         raise ValueError("The checkpoint is missing its model contract")
     if contract.get("training_version") != training_version_for_model(str(contract["model_name"])):
         raise ValueError("Unsupported checkpoint training version")
+    _validate_supervision(checkpoint, contract)
     model = build_event_classifier(
         model_name=str(contract["model_name"]),
         pretrained=False,
@@ -92,6 +94,19 @@ def load_evaluation_model(
     model.load_state_dict(checkpoint["model_state"])
     model.to(device).eval()
     return model, contract
+
+
+def _validate_supervision(checkpoint: dict[str, Any], contract: dict[str, Any]) -> None:
+    supervision = checkpoint.get("options", {}).get("supervision", "event")
+    if supervision not in {"event", VIDEO_MAX} or contract.get("supervision") != (
+        VIDEO_SUPERVISION_CONTRACT if supervision == VIDEO_MAX else None
+    ):
+        raise ValueError("Checkpoint supervision contract is missing or incompatible")
+    if supervision == VIDEO_MAX and (
+        contract.get("model_name") != FUSION_MODEL
+        or contract.get("seed") != checkpoint.get("options", {}).get("seed")
+    ):
+        raise ValueError("Video supervision requires full-fusion provenance and a matching seed")
 
 
 def _forward_batch(
@@ -270,6 +285,7 @@ def evaluation_inputs(
     if contract.get("training_version") != training_version_for_model(model_name):
         raise ValueError("Unsupported checkpoint training version")
     options = checkpoint.get("options", {})
+    _validate_supervision(checkpoint, contract)
     if not engineering_preflight and (
         "max_train_batches" not in options or "max_validation_batches" not in options
         or options["max_train_batches"] is not None
@@ -305,6 +321,7 @@ def evaluation_inputs(
         "model_name": model_name, "training_version": contract["training_version"],
         "sequence_length": contract["sequence_length"], "image_size": contract["image_size"],
         "evidence_version": EVIDENCE_VERSION, "fusion_inputs": fusion_inputs,
+        **({"supervision": contract["supervision"]} if contract.get("supervision") else {}),
     }
     return contract, provenance
 
@@ -528,6 +545,9 @@ def run_verdict(
         "model_name": contract.get("model_name"),
         "model": contract.get("model"),
         "training_version": contract.get("training_version"),
+        **({"supervision": contract["supervision"],
+            "event_metrics_scope": "diagnostic against legacy event annotations; not supervised localization"}
+           if contract.get("supervision") else {}),
         "threshold": threshold_record,
         "aggregation": "maximum event probability",
         "event_count": len(records),

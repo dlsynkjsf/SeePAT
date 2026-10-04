@@ -535,10 +535,13 @@ def run_workflow_job(
 
 
 def _model_training_options(job: ModelTrainingJob):
-    from seepat.training.train import TrainingOptions
+    from seepat.training.train import FUSION_MODEL, TrainingOptions
+    from seepat.training.video_objective import VIDEO_MAX
 
     options = TrainingOptions(**job.options)
     options.validate()
+    if options.supervision == VIDEO_MAX and job.model != FUSION_MODEL:
+        raise ValueError("Production video_max supervision is supported only by full fusion")
     return options
 
 
@@ -553,6 +556,7 @@ def _model_training_configuration_matches(
         model_contract_name,
         training_version_for_model,
     )
+    from seepat.training.video_objective import VIDEO_MAX, VIDEO_SUPERVISION_CONTRACT
 
     try:
         options = _model_training_options(job)
@@ -572,6 +576,7 @@ def _model_training_configuration_matches(
         recorded_options.setdefault("backbone_learning_rate", None)
         recorded_options.setdefault("loss_function", "cross_entropy")
         recorded_options.setdefault("focal_gamma", 2.0)
+        recorded_options.setdefault("supervision", "event")
         recorded_options.pop("epochs", None)
         expected_options.pop("epochs")
         if job.device != "auto" and run_record.get("device") != job.device:
@@ -586,6 +591,10 @@ def _model_training_configuration_matches(
         return (
             run_record.get("run_type") == expected_type
             and recorded_options == expected_options
+            and contract.get("supervision") == (
+                VIDEO_SUPERVISION_CONTRACT if options.supervision == VIDEO_MAX else None
+            )
+            and (options.supervision != VIDEO_MAX or contract.get("seed") == options.seed)
             and contract.get("training_version") == training_version_for_model(job.model)
             and contract.get("model") == model_contract_name(job.model)
             and contract.get("model_name", SWIN_BASE_MODEL) == job.model
