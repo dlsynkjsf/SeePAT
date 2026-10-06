@@ -1,0 +1,20 @@
+# Same new cohort, frozen inner thresholds. No refitting on outer results.
+# Video BA primary; lower FPR exact tie; exact BA/FPR tie retains Phase 3.
+report: outputs/workflow_fusion_phase4_outer_evaluation_summary.json
+
+decisions:
+  - &outer
+    name: phase4-video-max-reference-outer
+    validation_manifest: outputs/numerical_calibration/phase4_outer_v1/events_phase4_outer_calibrated.csv
+    source_manifest: data/manifests/phase4_val_outer1000.csv
+    checkpoint: outputs/training/fusion_phase3_v1/experiments/video_max/checkpoint_best.pt
+    threshold_artifact: outputs/decisions/fusion_phase3_v1/inner/video_max/threshold.json
+    output_dir: outputs/decisions/fusion_phase4_v1/outer/video_max_reference
+    device: cuda
+    batch_size: 1
+
+  - <<: *outer
+    name: phase4-video-max-unfreeze-outer
+    checkpoint: outputs/training/fusion_phase4_v1/experiments/video_max_unfreeze/checkpoint_best.pt
+    threshold_artifact: outputs/decisions/fusion_phase4_v1/inner/video_max_unfreeze/threshold.json
+    output_dir: outputs/decisions/fusion_phase4_v1/outer/video_max_unfreeze

@@ -1,0 +1,20 @@
+# Prepare only the new outer videos. Population calibration stays Train-only.
+report: outputs/workflow_phase4_cohort_summary.json
+
+jobs:
+  - name: phase4-val-outer1000
+    pipeline_config: configs/phase4_val_outer1000.yaml
+    manifest_output_dir: data/training/phase4-val-outer1000
+
+trace_augmentation:
+  - name: phase4-val-vild-augmentation
+    manifest: data/training/phase4-val-outer1000/events_val.csv
+    extracted_root: data/extracted/avpp/phase4-val-outer1000/val
+    output_dir: outputs/trace_augmentation/phase4_val_outer
+
+numerical_calibration:
+  name: phase4-frozen-vild-calibration
+  calibration: outputs/numerical_calibration/guarded_per_video_v3/calibration.json
+  score_manifests:
+    phase4_outer: outputs/trace_augmentation/phase4_val_outer/events_augmented.csv
+  output_dir: outputs/numerical_calibration/phase4_outer_v1

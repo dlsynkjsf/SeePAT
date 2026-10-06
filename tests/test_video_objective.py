@@ -9,6 +9,7 @@ from torch import nn
 from torch.utils.data import DataLoader, Subset
 
 from seepat.artifacts import atomic_write_json, file_sha256
+from seepat.training.dataset import MouthEventDataset
 from seepat.training.train import (
     TrainingOptions,
     _balanced_class_weights,
@@ -263,7 +264,10 @@ def test_unverified_video_combinations_are_rejected(change):
         options(**change).validate()
 
 
-def test_real_fusion_video_readiness_resume_skip_and_complete_bag_gate(tmp_path, monkeypatch):
+@pytest.mark.parametrize("unfreeze", [False, True])
+def test_real_fusion_video_readiness_resume_skip_and_complete_bag_gate(
+    tmp_path, monkeypatch, unfreeze
+):
     from test_fusion_model import _tiny_model
     from test_fusion_training import calibrated_inputs
 
@@ -278,10 +282,15 @@ def test_real_fusion_video_readiness_resume_skip_and_complete_bag_gate(tmp_path,
     paths = calibrated_inputs(tmp_path)
     monkeypatch.setattr(
         "seepat.training.train.build_event_classifier",
-        lambda **kwargs: _tiny_model(freeze_backbone=True),
+        lambda **kwargs: _tiny_model(
+            freeze_backbone=True,
+            unfreeze_final_backbone_stages=kwargs["unfreeze_final_backbone_stages"],
+        ),
     )
     settings = options(
-        epochs=1, sequence_length=4, image_size=8, max_train_batches=2, max_validation_batches=2
+        epochs=1, sequence_length=4, image_size=8, max_train_batches=2, max_validation_batches=2,
+        unfreeze_final_backbone_stages=unfreeze,
+        backbone_learning_rate=0.00001 if unfreeze else None,
     )
     job = ModelTrainingJob(
         "video",
@@ -294,12 +303,45 @@ def test_real_fusion_video_readiness_resume_skip_and_complete_bag_gate(tmp_path,
         asdict(settings),
         FUSION_MODEL,
     )
+    if unfreeze:
+        source = replace(
+            job, name="phase3-reference", output_dir=tmp_path / "reference",
+            options=asdict(replace(
+                settings, unfreeze_final_backbone_stages=False,
+                backbone_learning_rate=None, max_train_batches=None, max_validation_batches=None,
+            )),
+        )
+        run_model_training_job(source)
+        job = replace(job, initialize_from=source.output_dir / "checkpoint_best.pt")
     assert audit_inputs(job)["inputs"]["train"]["video_class_counts"] == {"0": 1, "1": 1}
     assert run_model_training_job(job)["action"] == "ran"
     assert check_readiness(job)["status"] == "pending"
     job = replace(job, options=asdict(replace(settings, epochs=2)))
     assert run_model_training_job(job)["action"] == "resumed"
     assert check_readiness(job)["status"] == "passed"
+    if unfreeze:
+        last = torch.load(job.output_dir / "checkpoint_last.pt", weights_only=True)
+        reference = torch.load(job.initialize_from, weights_only=True)
+        assert last["global_step"] == 2
+        assert all(float(state["step"]) == 2 for state in last["optimizer_state"]["state"].values())
+        assert last["resume_contract"]["initial_checkpoint"]["sha256"] == file_sha256(job.initialize_from)
+        assert any(
+            not torch.equal(value, reference["model_state"][key])
+            for key, value in last["model_state"].items()
+            if key.startswith(("backbone.", "frame_backbone."))
+        )
+        assert [g["lr"] for g in last["optimizer_state"]["param_groups"]] == [0.0001, 0.00001]
+        assert last["resume_contract"]["unfreeze_final_backbone_stages"] is True
+        original = _tiny_model(freeze_backbone=True, unfreeze_final_backbone_stages=True)
+        changed_options = replace(settings, epochs=3, backbone_learning_rate=0.00002)
+        with pytest.raises(ValueError, match="does not match"):
+            train_model(
+                original,
+                MouthEventDataset(paths["train"], tmp_path, sequence_length=4, image_size=8, dataset_split="train", require_calibration=True),
+                MouthEventDataset(paths["val"], tmp_path, sequence_length=4, image_size=8, dataset_split="val", require_calibration=True),
+                job.output_dir, changed_options, torch.device("cpu"), last["resume_contract"],
+                resume_from=job.output_dir / "checkpoint_last.pt",
+            )
     assert run_model_training_job(job)["action"] == "skipped"
     assert model_training_outputs_are_current(job)
     checkpoint = job.output_dir / "checkpoint_last.pt"
@@ -375,6 +417,42 @@ def test_phase3_profiles_are_one_fit_and_matching_complete_video_readiness(monke
         monkeypatch.setattr("sys.argv", arguments + extra)
         cli.main()
     assert purposes == ["phase2_outer_development_cohort", "phase3_outer_development_cohort"]
+
+
+def test_phase4_profiles_match_one_fit_and_preserve_phase3_reference():
+    from pathlib import Path
+
+    from seepat.workflow import load_workflow_settings
+
+    base = Path("configs")
+    ready = load_workflow_settings(base / "fusion_phase4_readiness.yaml").model_training_jobs[0]
+    full_settings = load_workflow_settings(base / "fusion_phase4.yaml")
+    assert len(full_settings.model_training_jobs) == 1
+    full = full_settings.model_training_jobs[0]
+    assert ready.initialize_from == full.initialize_from
+    assert "fusion_phase3_v1/experiments/video_max" in full.initialize_from.as_posix()
+    assert ready.output_dir == full.readiness_dir != full.output_dir
+    left, right = asdict(TrainingOptions(**ready.options)), asdict(TrainingOptions(**full.options))
+    TrainingOptions(**ready.options).validate()
+    TrainingOptions(**full.options).validate()
+    assert left["max_train_batches"] == 16 and left["max_validation_batches"] == 4
+    assert right["epochs"] == 10 and right["max_train_batches"] is None
+    for key in ("epochs", "max_train_batches", "max_validation_batches"):
+        left.pop(key)
+        right.pop(key)
+    assert left == right
+    assert left["supervision"] == "video_max" and left["unfreeze_final_backbone_stages"]
+    assert left["backbone_learning_rate"] == 0.00001 and not left["amp"]
+    assert left["positive_class_weight_ratio"] is None
+    outer = load_workflow_settings(base / "fusion_phase4_outer_evaluation.yaml")
+    reference, candidate = outer.decision_jobs
+    assert reference.validation_manifest == candidate.validation_manifest
+    assert "phase4_outer_v1" in reference.validation_manifest.as_posix()
+    assert reference.checkpoint == full.initialize_from
+    assert "fusion_phase3_v1/inner/video_max" in reference.threshold_artifact.as_posix()
+    assert candidate.checkpoint.parent == full.output_dir
+    cohort = load_workflow_settings(base / "phase4_cohort.yaml")
+    assert not cohort.model_training_jobs and not cohort.decision_jobs
 
 
 def test_video_decisions_bind_supervision_and_explanations_do_not_claim_localization(

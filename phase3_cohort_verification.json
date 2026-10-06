@@ -1,0 +1,31 @@
+{
+  "workflow_config": "configs/phase3_cohort.yaml",
+  "stages_current": 4,
+  "stages_total": 4,
+  "all_current": true,
+  "preparation": [
+    {
+      "name": "phase3-val-outer1000",
+      "preprocessing": "current",
+      "training_manifest": "current"
+    }
+  ],
+  "model_training": [],
+  "evidence_stages": [
+    {
+      "name": "phase3-val-vild-augmentation",
+      "status": "current",
+      "videos_finished": 964,
+      "videos_requested": 964
+    },
+    {
+      "name": "phase3-frozen-vild-calibration",
+      "status": "current",
+      "videos_finished": 0,
+      "videos_requested": 0,
+      "manifest": ""
+    }
+  ],
+  "decisions": [],
+  "ablation_study": null
+}

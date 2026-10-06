@@ -1,0 +1,11 @@
+# Original inner Validation selects only the new candidate's threshold.
+report: outputs/workflow_fusion_phase4_validation_summary.json
+
+decisions:
+  - name: phase4-video-max-unfreeze-validation
+    validation_manifest: outputs/numerical_calibration/guarded_per_video_v3/events_val_calibrated.csv
+    source_manifest: data/manifests/val_subset1000.csv
+    checkpoint: outputs/training/fusion_phase4_v1/experiments/video_max_unfreeze/checkpoint_best.pt
+    output_dir: outputs/decisions/fusion_phase4_v1/inner/video_max_unfreeze
+    device: cuda
+    batch_size: 1

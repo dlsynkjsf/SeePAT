@@ -1,0 +1,2 @@
+6bee2da4ab800638f14b0b28d1d5dce846015636e5489c240aa75b28f224c225 *outputs/training/fusion_phase3_v1/experiments/video_max/checkpoint_best.pt
+e55a8a680144e6ffa5c0efefbbacbfc0fff81e690146264a903c40d950b16357 *outputs/decisions/fusion_phase3_v1/inner/video_max/threshold.json

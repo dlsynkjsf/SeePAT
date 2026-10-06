@@ -195,11 +195,11 @@ class TrainingOptions:
             raise ValueError("supervision must be 'event' or 'video_max'")
         if self.supervision == VIDEO_MAX and (
             self.batch_size != 1 or self.amp or not self.freeze_backbone
-            or self.unfreeze_final_backbone_stages or self.class_weighting != "balanced_global"
+            or self.class_weighting != "balanced_global"
             or self.positive_class_weight_ratio is not None or self.loss_function != "cross_entropy"
         ):
             raise ValueError(
-                "video_max requires batch size one, FP32, frozen encoders, "
+                "video_max requires batch size one, FP32, frozen earlier encoder stages, "
                 "balanced_global video weights, no positive ratio override and cross_entropy"
             )
         if self.selection_metric not in {
