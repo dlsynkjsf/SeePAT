@@ -1,0 +1,14 @@
+# Timing-only Train pilot. No video decoding, preprocessing, model loading or fitting.
+report: outputs/workflow_phase5_coverage_pilot_summary.json
+coverage_pilot:
+  name: phase5-context-coverage-pilot
+  source_manifest: data/manifests/train_subset5000.csv
+  video_manifest: outputs/train-subset5000/video_manifest.csv
+  event_manifest: outputs/numerical_calibration/guarded_per_video_v3/events_train_calibrated.csv
+  output_dir: outputs/phase5_coverage_pilot_v1
+  max_videos: 128
+  seed: 20261013
+  expected_sha256:
+    source_manifest: 08409a3cd843cc43a2ec1f38e7fdd9960be8672251b18bb5e915ee96f1c034ce
+    video_manifest: 6d572ee46b1aa7b5b22e608fd47d9f5af5c8863189e4d8a6245c892409bdfbd4
+    event_manifest: ad6d716b83d5a6f35147ae0c37bd1287e8d1d9b62558e865a2d12f0221c03822

@@ -12,6 +12,7 @@ import yaml
 
 from seepat.artifacts import atomic_write_json, read_csv_rows, stable_id
 from seepat.config import PipelineSettings, load_pipeline_settings
+from seepat.coverage import CoveragePilotJob, run_coverage_pilot
 from seepat.decision import DecisionJob, run_decision_job
 from seepat.live_progress import ProgressCallback, WorkflowProgress
 from seepat.pipeline import PIPELINE_VERSION, run_pipeline
@@ -51,6 +52,7 @@ class ModelTrainingJob:
     model: str = "swin3d_b"
     readiness_dir: Path | None = None
     initialize_from: Path | None = None
+    input_profile: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -75,6 +77,7 @@ class WorkflowSettings:
     decision_jobs: tuple[DecisionJob, ...] = ()
     model_training_config: Path | None = None
     study_job: StudyJob | None = None
+    coverage_pilot_jobs: tuple[CoveragePilotJob, ...] = ()
 
 
 def _require_mapping(value: object, description: str) -> dict[str, Any]:
@@ -170,6 +173,8 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
                     if training.get("initialize_from")
                     else None
                 ),
+                input_profile=(dict(_require_mapping(training["input_profile"], "Matched input profile"))
+                               if training.get("input_profile") is not None else None),
             )
         except KeyError as error:
             raise ValueError(
@@ -295,6 +300,8 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
                 if item.get("threshold_artifact")
                 else None
             ),
+            input_profile=(dict(_require_mapping(item["input_profile"], "Decision matched profile"))
+                           if item.get("input_profile") is not None else None),
         )
         if not decision.name or decision.batch_size < 1 or any(
             old.name == decision.name or old.output_dir == decision.output_dir for old in decision_jobs
@@ -311,7 +318,24 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
             item["models"] = tuple(item["models"])
         study_job = StudyJob(**item)
         study_job.validate()
-    if not (jobs or augmentation_jobs or numerical_calibration_jobs or model_training_jobs or decision_jobs or study_job):
+    coverage_jobs = []
+    raw_coverage = config.get("coverage_pilot", [])
+    if isinstance(raw_coverage, dict):
+        raw_coverage = [raw_coverage]
+    if not isinstance(raw_coverage, list):
+        raise TypeError("coverage_pilot must be a mapping or list")
+    for raw_job in raw_coverage:
+        item = dict(_require_mapping(raw_job, "Coverage pilot"))
+        for key in ("source_manifest", "video_manifest", "event_manifest", "output_dir"):
+            item[key] = Path(item[key])
+        job = CoveragePilotJob(**item)
+        job.validate()
+        if any(j.name == job.name or j.output_dir.resolve() == job.output_dir.resolve()
+               for j in coverage_jobs):
+            raise ValueError("Duplicate coverage pilot name/output")
+        coverage_jobs.append(job)
+    if not (jobs or augmentation_jobs or numerical_calibration_jobs or model_training_jobs
+            or decision_jobs or study_job or coverage_jobs):
         raise ValueError("Workflow configuration must contain at least one job")
     report_path = Path(str(config.get("report", "outputs/workflow_summary.json")))
     return WorkflowSettings(
@@ -323,6 +347,7 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
         decision_jobs=tuple(decision_jobs),
         model_training_config=training_config,
         study_job=study_job,
+        coverage_pilot_jobs=tuple(coverage_jobs),
     )
 
 
@@ -542,6 +567,13 @@ def _model_training_options(job: ModelTrainingJob):
     options.validate()
     if options.supervision == VIDEO_MAX and job.model != FUSION_MODEL:
         raise ValueError("Production video_max supervision is supported only by full fusion")
+    if job.input_profile is not None:
+        from seepat.training.matched_inputs import validate_profile
+
+        validate_profile(job.input_profile)
+        if (job.model != FUSION_MODEL or options.supervision != VIDEO_MAX
+                or options.sequence_length != 16 or options.unfreeze_final_backbone_stages):
+            raise ValueError("Matched inputs require frozen fusion/video_max and 16 slots")
     return options
 
 
@@ -584,8 +616,21 @@ def _model_training_configuration_matches(
         if job.model == FUSION_MODEL:
             from seepat.evidence import calibrated_manifest_contract
 
-            train_contract = calibrated_manifest_contract(job.train_manifest)
-            val_contract = calibrated_manifest_contract(job.validation_manifest)
+            if job.input_profile is not None:
+                from seepat.training.matched_inputs import MatchedClipDataset
+
+                datasets = [MatchedClipDataset(path, job.project_root, split, job.input_profile,
+                                               options.sequence_length, options.image_size)
+                            for split, path in (("train", job.train_manifest), ("val", job.validation_manifest))]
+                train_contract, val_contract = [dataset.calibration_contract for dataset in datasets]
+                if (datasets[0].input_contract != datasets[1].input_contract
+                        or contract.get("clip_input_contract") != datasets[0].input_contract):
+                    return False
+            else:
+                train_contract = calibrated_manifest_contract(job.train_manifest)
+                val_contract = calibrated_manifest_contract(job.validation_manifest)
+                if contract.get("clip_input_contract") is not None:
+                    return False
             if train_contract != val_contract or contract.get("fusion_inputs") != train_contract:
                 return False
         return (
@@ -663,6 +708,7 @@ def _run_model_training(
         resume_from=resume_from,
         initialize_from=job.initialize_from,
         progress=progress,
+        **({"input_profile": job.input_profile} if job.input_profile is not None else {}),
     )
 
 
@@ -777,6 +823,7 @@ def run_workflow(
     }
     tasks = (
         [("jobs", job) for job in settings.jobs]
+        + [("coverage_pilot", job) for job in settings.coverage_pilot_jobs]
         + [("trace_augmentation", job) for job in settings.trace_augmentation_jobs]
         + [("numerical_calibration", job) for job in settings.numerical_calibration_jobs]
         + [("model_training", job) for job in settings.model_training_jobs]
@@ -794,6 +841,8 @@ def run_workflow(
                 result = run_workflow_job(job, retry_failed=retry_failed, progress=progress)
             elif kind == "trace_augmentation":
                 result = run_trace_augmentation(job, progress=progress)
+            elif kind == "coverage_pilot":
+                result = run_coverage_pilot(job, progress=progress)
             elif kind == "numerical_calibration":
                 result = run_numerical_calibration_job(job, progress=progress)
             elif kind == "decisions":
@@ -816,6 +865,12 @@ def run_workflow(
 def format_workflow_summary(report: dict[str, object], report_path: Path) -> str:
     """Compact terminal summary; JSON remains the authoritative report."""
     lines = ["", "#" * 72, "WORKFLOW COMPLETE"]
+    for row in report.get("coverage_pilot", []):
+        summary = row["summary"]
+        gain = summary["visual_coverage_gain"]
+        text = f"{gain:+.1%}" if gain is not None else "unavailable"
+        lines.append(f"  {row['name']} | {row['action']} | visual coverage gain {text}")
+        lines.append(f"  Next-step gate: {summary['gate']['decision']} (not a classifier result)")
     for row in report.get("model_training", []):
         summary = row.get("summary", {})
         metric = summary.get("selection_metric", "validation_video_f1")

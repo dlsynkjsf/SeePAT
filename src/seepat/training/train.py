@@ -24,7 +24,6 @@ from seepat.models.cnn_temporal import (
 )
 from seepat.models.fusion import FUSION_MODEL_NAME, HybridFusionEventClassifier
 from seepat.models.swin_baseline import SwinBaseEventClassifier, parameter_counts
-from seepat.training.dataset import MouthEventDataset
 from seepat.training.metrics import (
     aggregate_video_probabilities,
     binary_classification_metrics,
@@ -34,6 +33,7 @@ from seepat.training.video_objective import (
     VIDEO_MAX,
     VIDEO_SUPERVISION_CONTRACT,
     VideoBag,
+    event_diagnostic_metrics,
     scored_video_bags,
     select_video_bags,
     train_video_epoch,
@@ -483,7 +483,8 @@ def _evaluate(
         "loss": loss_sum / (len(video_plan) if video_plan is not None else event_count),
         "batches": batch_count,
         "events_processed": event_count,
-        "events": binary_classification_metrics(event_labels, event_probabilities),
+        "events": event_diagnostic_metrics(event_labels, event_probabilities),
+        **({"context_clips_processed": event_labels.count(-1)} if -1 in event_labels else {}),
         "videos": video_metrics,
         "selection": selection,
         "videos_at_selection_threshold": selected_video_metrics,
@@ -697,8 +698,11 @@ def train_model(
     scaler = torch.amp.GradScaler("cuda", enabled=amp_enabled)
     if device.type == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
-    train_bags = video_bags(train_rows) if options.supervision == VIDEO_MAX else None
-    validation_bags = video_bags(validation_rows) if options.supervision == VIDEO_MAX else None
+    allow_context = resume_contract.get("clip_input_contract") is not None
+    if allow_context and options.supervision != VIDEO_MAX:
+        raise ValueError("Matched contexts require complete-video supervision")
+    train_bags = video_bags(train_rows, allow_context) if options.supervision == VIDEO_MAX else None
+    validation_bags = video_bags(validation_rows, allow_context) if options.supervision == VIDEO_MAX else None
     weighting_rows = (
         [{"class_id": str(bag.label)} for bag in train_bags]
         if train_bags is not None else train_rows
@@ -1190,6 +1194,20 @@ def _initialize_model_from_checkpoint(
         "validation_manifest_sha256",
         "fusion_inputs",
     )
+    matched = expected_contract.get("clip_input_contract")
+    if matched is not None:
+        if (contract.get("clip_input_contract") is not None
+                or contract.get("supervision") != VIDEO_SUPERVISION_CONTRACT
+                or contract.get("fusion_inputs") != expected_contract.get("fusion_inputs")
+                or contract.get("train_manifest_sha256") != matched["source_manifest_sha256"]["train"]
+                or contract.get("validation_manifest_sha256") != matched["source_manifest_sha256"]["val"]
+                or _sha256(checkpoint_path) != matched["profile"]["initial_checkpoint_sha256"]):
+            raise ValueError("Matched warm start differs from pinned original manifests/calibration/checkpoint")
+        # The changed clip indexes replace manifest identity only; original
+        # source manifests and calibration were explicitly checked above.
+        immutable = tuple(key for key in immutable if key not in {
+            "train_manifest_sha256", "validation_manifest_sha256", "fusion_inputs"
+        })
     if any(contract.get(key) != expected_contract.get(key) for key in immutable):
         raise ValueError("Initial checkpoint does not match the model, manifests, or evidence")
     run = json.loads((checkpoint_path.parent / "run.json").read_text(encoding="utf-8"))
@@ -1215,30 +1233,39 @@ def train_from_manifests(
     resume_from: Path | None = None,
     initialize_from: Path | None = None,
     progress: ProgressCallback | None = None,
+    input_profile: dict | None = None,
 ) -> dict[str, object]:
     options.validate()
     if options.supervision == VIDEO_MAX and model_name != FUSION_MODEL:
         raise ValueError("Production video_max supervision is supported only by full fusion")
+    if input_profile is not None and (model_name != FUSION_MODEL or options.supervision != VIDEO_MAX
+                                      or options.sequence_length != 16 or options.unfreeze_final_backbone_stages):
+        raise ValueError("Matched inputs require frozen FP32 full-fusion video_max with 16 slots")
+    from seepat.training.matched_inputs import input_dataset
     device = _device(device_name)
     torch.hub.set_dir(str(project_root / ".cache" / "torch"))
-    train_dataset = MouthEventDataset(
+    train_dataset = input_dataset(
         manifest_path=train_manifest,
         project_root=project_root,
         dataset_split="train",
         sequence_length=options.sequence_length,
         image_size=options.image_size,
         require_calibration=model_name == FUSION_MODEL,
+        input_profile=input_profile,
     )
-    validation_dataset = MouthEventDataset(
+    validation_dataset = input_dataset(
         manifest_path=validation_manifest,
         project_root=project_root,
         dataset_split="val",
         sequence_length=options.sequence_length,
         image_size=options.image_size,
         require_calibration=model_name == FUSION_MODEL,
+        input_profile=input_profile,
     )
     if train_dataset.calibration_contract != validation_dataset.calibration_contract:
         raise ValueError("Fusion Train and Validation must share the same frozen calibration")
+    if input_profile is not None and train_dataset.input_contract != validation_dataset.input_contract:
+        raise ValueError("Matched Train/Validation must use the same arm and pinned export")
     if source_group_overlap(train_dataset.rows, validation_dataset.rows):
         raise ValueError("Source-group leakage between train and validation")
     if progress is not None:
@@ -1271,6 +1298,10 @@ def train_from_manifests(
         resume_contract["positive_class_weight_ratio"] = options.positive_class_weight_ratio
     if model_name == FUSION_MODEL:
         resume_contract["fusion_inputs"] = train_dataset.calibration_contract
+    if input_profile is not None:
+        resume_contract["clip_input_contract"] = train_dataset.input_contract
+        if initialize_from is None:
+            raise ValueError("Matched training requires the pinned Phase-3 warm start")
     if initialize_from is not None:
         resume_contract["initial_checkpoint"] = {
             "path": initialize_from.as_posix(),

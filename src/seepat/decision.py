@@ -20,6 +20,7 @@ class DecisionJob:
     device: str = "auto"
     batch_size: int = 1
     threshold_artifact: Path | None = None
+    input_profile: dict[str, str] | None = None
 
 
 def decision_stage_status(job: DecisionJob) -> dict[str, str]:
@@ -37,6 +38,8 @@ def decision_stage_status(job: DecisionJob) -> dict[str, str]:
             job.checkpoint,
             "val",
             validation_transfer=transfer,
+            project_root=job.project_root,
+            **({"input_profile": job.input_profile} if job.input_profile is not None else {}),
         )
         threshold_path = job.threshold_artifact or job.output_dir / "threshold.json"
         threshold_provenance = provenance
@@ -45,6 +48,8 @@ def decision_stage_status(job: DecisionJob) -> dict[str, str]:
                 **provenance,
                 "validation_manifest_sha256": contract["validation_manifest_sha256"],
             }
+            if contract.get("clip_input_contract") is not None:
+                threshold_provenance["clip_input_contract"] = contract["clip_input_contract"]
         _load_threshold(None, threshold_path, threshold_provenance)
         status["threshold"] = "current"
         directory = job.output_dir / "verdict"
@@ -89,6 +94,8 @@ def run_decision_job(job: DecisionJob, progress: ProgressCallback | None = None)
         job.checkpoint,
         "val",
         validation_transfer=transfer,
+        project_root=job.project_root,
+        **({"input_profile": job.input_profile} if job.input_profile is not None else {}),
     )
     current = decision_stage_status(job)
     actions = {}
@@ -116,6 +123,7 @@ def run_decision_job(job: DecisionJob, progress: ProgressCallback | None = None)
                     job.threshold_artifact or job.output_dir / "threshold.json"
                 ),
                 validation_transfer=transfer,
+                **({"input_profile": job.input_profile} if job.input_profile is not None else {}),
                 **common,
             )
         else:

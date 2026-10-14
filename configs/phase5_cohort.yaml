@@ -1,0 +1,20 @@
+# New prospective outer development videos only; original Train calibration stays frozen.
+report: outputs/workflow_phase5_cohort_summary.json
+
+jobs:
+  - name: phase5-val-outer1000
+    pipeline_config: configs/phase5_val_outer1000.yaml
+    manifest_output_dir: data/training/phase5-val-outer1000
+
+trace_augmentation:
+  - name: phase5-val-vild-augmentation
+    manifest: data/training/phase5-val-outer1000/events_val.csv
+    extracted_root: data/extracted/avpp/phase5-val-outer1000/val
+    output_dir: outputs/trace_augmentation/phase5_val_outer
+
+numerical_calibration:
+  name: phase5-frozen-vild-calibration
+  calibration: outputs/numerical_calibration/guarded_per_video_v3/calibration.json
+  score_manifests:
+    phase5_outer: outputs/trace_augmentation/phase5_val_outer/events_augmented.csv
+  output_dir: outputs/numerical_calibration/phase5_outer_v1

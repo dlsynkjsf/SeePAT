@@ -37,7 +37,7 @@ class VideoBag:
     event_ids: tuple[str, ...]
 
 
-def video_bags(rows: list[dict[str, str]]) -> list[VideoBag]:
+def video_bags(rows: list[dict[str, str]], allow_context: bool = False) -> list[VideoBag]:
     groups: dict[str, list[int]] = {}
     metadata: dict[str, tuple[str, str]] = {}
     event_ids: set[str] = set()
@@ -51,7 +51,10 @@ def video_bags(rows: list[dict[str, str]]) -> list[VideoBag]:
             raise ValueError("Video bags require unique event IDs and nonempty video/source IDs")
         if identifier in metadata and metadata[identifier] != (source, modality):
             raise ValueError("Events of a video have inconsistent source group or video label")
-        if row.get("class_id") not in {"0", "1"} or (label == 0 and row["class_id"] != "0"):
+        context = allow_context and row.get("kind") == "context"
+        if context and (row.get("class_id") != "-1" or row.get("phoneme") != ""):
+            raise ValueError("Context clips must have an unavailable event target and no phoneme")
+        if not context and (row.get("class_id") not in {"0", "1"} or (label == 0 and row["class_id"] != "0")):
             raise ValueError("Invalid event label in a video bag")
         event_ids.add(event_id)
         metadata[identifier] = (source, modality)
@@ -65,6 +68,19 @@ def video_bags(rows: list[dict[str, str]]) -> list[VideoBag]:
         )
         for identifier, indices in groups.items()
     ]
+
+
+def event_diagnostic_metrics(labels, probabilities, threshold=0.5):
+    """Context clips have no event annotation; retain them only in video scoring."""
+    if len(labels) != len(probabilities) or any(label not in {-1, 0, 1} for label in labels):
+        raise ValueError("Invalid event target/membership")
+    pairs = [(label, p) for label, p in zip(labels, probabilities, strict=True) if label != -1]
+    if not pairs:
+        raise ValueError("A matched bag must retain bilabial event evidence")
+    result = binary_classification_metrics([label for label, _ in pairs], [p for _, p in pairs], threshold)
+    if len(pairs) != len(labels):
+        result["unlabelled_context_clips_excluded"] = len(labels) - len(pairs)
+    return result
 
 
 def select_video_bags(
@@ -144,6 +160,12 @@ def scored_video_bags(
             if first_batch is None:
                 first_batch = batch
             videos = batch["video"].to(device, non_blocking=True)
+            if batch.get("kind") == ["context"] and (
+                batch["label"].tolist() != [-1] or batch["phoneme"] != [""]
+                or batch["evidence_feature_mask"].any() or batch["feature_mask"].any()
+                or batch["evidence_features"].any() or batch["features"].any()
+            ):
+                raise ValueError("Context batch fabricated event or numerical evidence")
             logits = forward(model, videos, batch, device)
             if logits.shape != (1, 2) or not torch.isfinite(logits).all().item():
                 raise FloatingPointError("Video objective requires finite binary event logits")
@@ -217,7 +239,8 @@ def train_video_epoch(
             {"video_id": bag.video_id, "label": bag.label, "events": len(bag.indices)}
             for bag in bags
         ],
-        "events": binary_classification_metrics(labels, probabilities),
+        "events": event_diagnostic_metrics(labels, probabilities),
+        **({"context_clips_processed": labels.count(-1)} if -1 in labels else {}),
         "videos": binary_classification_metrics([bag.label for bag in bags], video_probabilities),
         "optimizer_steps": updates,
         "first_batch": first_batch,

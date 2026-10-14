@@ -1,0 +1,19 @@
+# Original inner Validation only: select each arm's own threshold, never the outer threshold.
+report: outputs/workflow_fusion_phase5_validation_summary.json
+
+decisions:
+  - &decision
+    name: phase5-control-inner-validation
+    validation_manifest: outputs/phase5_context_inputs_v1/control_val.csv
+    source_manifest: data/manifests/val_subset1000.csv
+    checkpoint: outputs/training/fusion_phase5_v1/experiments/control/checkpoint_best.pt
+    output_dir: outputs/decisions/fusion_phase5/control
+    project_root: .
+    device: cuda
+    batch_size: 1
+
+  - <<: *decision
+    name: phase5-candidate-inner-validation
+    validation_manifest: outputs/phase5_context_inputs_v1/candidate_val.csv
+    checkpoint: outputs/training/fusion_phase5_v1/experiments/candidate/checkpoint_best.pt
+    output_dir: outputs/decisions/fusion_phase5/candidate

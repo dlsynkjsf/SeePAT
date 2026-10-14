@@ -1,0 +1,26 @@
+# Same frozen fresh cohort for both arms, using each arm's original-inner threshold.
+# Video BA primary; an exact BA tie retains the matched bilabial-only control.
+report: outputs/workflow_fusion_phase5_outer_evaluation_summary.json
+
+decisions:
+  - &outer
+    name: phase5-control-outer-validation
+    validation_manifest: outputs/phase5_outer_context_inputs_v1/control_val.csv
+    source_manifest: data/manifests/phase5_val_outer1000.csv
+    checkpoint: outputs/training/fusion_phase5_v1/experiments/control/checkpoint_best.pt
+    threshold_artifact: outputs/decisions/fusion_phase5/control/threshold.json
+    output_dir: outputs/decisions/fusion_phase5_outer/control
+    project_root: .
+    device: cuda
+    batch_size: 1
+    input_profile:
+      version: matched-clips-v1
+      summary_sha256: 350cb7b230fc92844ca9f7dc9ea3ce67fda3fc4af5470d944553d14bc76d6c26
+      initial_checkpoint_sha256: 6bee2da4ab800638f14b0b28d1d5dce846015636e5489c240aa75b28f224c225
+
+  - <<: *outer
+    name: phase5-candidate-outer-validation
+    validation_manifest: outputs/phase5_outer_context_inputs_v1/candidate_val.csv
+    checkpoint: outputs/training/fusion_phase5_v1/experiments/candidate/checkpoint_best.pt
+    threshold_artifact: outputs/decisions/fusion_phase5/candidate/threshold.json
+    output_dir: outputs/decisions/fusion_phase5_outer/candidate

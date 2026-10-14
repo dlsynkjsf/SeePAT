@@ -254,6 +254,17 @@ def read_workflow_progress(config_path: Path) -> dict[str, object]:
             "videos_requested": record.get("videos_requested", 0),
             "manifest": record.get("manifest", ""),
         })
+    from seepat.coverage import coverage_outputs_are_current
+
+    coverage_pilots = []
+    for job in getattr(settings, "coverage_pilot_jobs", ()):
+        current = coverage_outputs_are_current(job)
+        current_stages += int(current)
+        record = _read_run_record(job.output_dir / "summary.json")
+        coverage_pilots.append({
+            "name": job.name, "status": "current" if current else "pending_or_stale",
+            "gate": record.get("gate", {}),
+        })
     from seepat.decision import decision_stage_status
 
     decisions = [{"name": job.name, "stages": decision_stage_status(job)} for job in settings.decision_jobs]
@@ -267,7 +278,8 @@ def read_workflow_progress(config_path: Path) -> dict[str, object]:
         study = {"name": settings.study_job.name, "phase": settings.study_job.phase,
                  "status": "current" if current else "pending_or_stale"}
     total_stages = (2 * len(settings.jobs) + len(settings.model_training_jobs)
-                    + len(evidence_stages) + 3 * len(decisions) + int(study is not None))
+                    + len(evidence_stages) + 3 * len(decisions) + int(study is not None)
+                    + len(coverage_pilots))
     return {
         "workflow_config": config_path.as_posix(),
         "stages_current": current_stages,
@@ -278,6 +290,7 @@ def read_workflow_progress(config_path: Path) -> dict[str, object]:
         "evidence_stages": evidence_stages,
         "decisions": decisions,
         "ablation_study": study,
+        **({"coverage_pilots": coverage_pilots} if coverage_pilots else {}),
     }
 
 

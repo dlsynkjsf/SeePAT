@@ -58,6 +58,11 @@ def _read_json(path: Path) -> dict[str, object]:
 
 
 def _event_evidence(record: dict[str, str]) -> dict[str, str]:
+    if record.get("kind") == "context":
+        if record.get("phoneme") or any(record.get(f"{field}_available", "").lower() == "true"
+                                         for field in FUSION_EVIDENCE_FIELDS):
+            raise ValueError("Context explanation cannot claim phoneme or calibrated evidence")
+        return {}
     evidence: dict[str, str] = {}
     for field in FUSION_EVIDENCE_FIELDS:
         value = record.get(field, "").strip()
@@ -137,6 +142,7 @@ def build_evidence_bundle(
                 "events": [
                     {
                         "event_id": event.get("event_id", ""),
+                        **({"kind": event["kind"]} if "kind" in event else {}),
                         "phoneme": event.get("phoneme", ""),
                         "manipulated_probability": event.get(
                             "manipulated_probability", ""
@@ -184,6 +190,8 @@ def build_evidence_bundle(
         "videos_reported": len(videos),
         "videos_omitted": max(0, len(verdict_rows) - len(videos)),
         "events_scored": len(event_rows),
+        **({"context_clips_scored": sum(row.get("kind") == "context" for row in event_rows)}
+           if any("kind" in row for row in event_rows) else {}),
         "events_with_missing_evidence_values": sum(count > 0 for count in missing_counts),
         "missing_evidence_values": sum(missing_counts),
         "videos": videos,
@@ -237,6 +245,11 @@ def render_evidence_summary(bundle: dict[str, object]) -> str:
         if isinstance(events, list):
             for event in events:
                 if not isinstance(event, dict):
+                    continue
+                if event.get("kind") == "context":
+                    lines.append(f"- Visual-only context clip {event.get('event_id')}: video evidence score="
+                                 f"{event.get('manipulated_probability')}; no phoneme/VILD evidence. "
+                                 "This is not a measured bilabial timing anomaly or verified localization.")
                     continue
                 evidence = event.get("evidence")
                 detail = "; ".join(

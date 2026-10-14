@@ -26,9 +26,20 @@ def audit_inputs(job: ModelTrainingJob) -> dict[str, object]:
     options.validate()
     if options.supervision == VIDEO_MAX and job.model != FUSION_MODEL:
         raise ValueError("Production video_max supervision is supported only by full fusion")
-    inputs, summaries, contracts = {}, {}, []
+    inputs, summaries, contracts, clip_contracts = {}, {}, [], []
     for split, path in (("train", job.train_manifest), ("val", job.validation_manifest)):
         rows = read_csv_rows(path)
+        matched_dataset = None
+        if job.input_profile is not None:
+            from seepat.training.matched_inputs import MatchedClipDataset
+
+            if job.model != FUSION_MODEL or options.supervision != VIDEO_MAX:
+                raise ValueError("Matched input audit requires fusion/video supervision")
+            matched_dataset = MatchedClipDataset(path, job.project_root, split, job.input_profile,
+                                                 options.sequence_length, options.image_size)
+            matched_dataset.audit_clips()
+            clip_contracts.append(matched_dataset.input_contract)
+            rows = matched_dataset.rows
         if not rows or any(
             row.get("dataset_split") != split
             or row.get("dataset_source", "AV-Deepfake1M++") != "AV-Deepfake1M++"
@@ -38,22 +49,25 @@ def audit_inputs(job: ModelTrainingJob) -> dict[str, object]:
         ids = [row.get("event_id") for row in rows]
         if not all(ids) or len(ids) != len(set(ids)):
             raise ValueError(f"{split} event IDs must be nonempty and unique")
-        bags = video_bags(rows) if options.supervision == VIDEO_MAX else None
+        bags = video_bags(rows, job.input_profile is not None) if options.supervision == VIDEO_MAX else None
         if bags is not None and {bag.label for bag in bags} != {0, 1}:
             raise ValueError(f"{split} must contain both binary video classes")
         if bags is None and {row["class_id"] for row in rows} != {"0", "1"}:
             raise ValueError(f"{split} must contain both binary event classes")
-        dataset = MouthEventDataset(path, job.project_root, dataset_split=split)
+        dataset = matched_dataset or MouthEventDataset(path, job.project_root, dataset_split=split)
         missing = [row["mouth_clip_path"] for row in rows
                    if not (job.project_root / row["mouth_clip_path"].replace("\\", "/")).is_file()]
         if missing:
             raise ValueError(f"{split} has {len(missing)} missing mouth clips; first: {missing[0]}")
         if job.model == FUSION_MODEL:
-            contracts.append(calibrated_manifest_contract(path, rows))
+            contracts.append(dataset.calibration_contract if matched_dataset else calibrated_manifest_contract(path, rows))
         inputs[split] = rows
         summaries[split] = {
             "events": len(dataset), "class_counts": dict(Counter(row["class_id"] for row in rows)),
             "source_groups": len({row["source_group"] for row in rows}),
+            **({"clip_kind_counts": dict(Counter(row["kind"] for row in rows)),
+                "event_target_minus_one": "unavailable context annotation, not a class"}
+               if matched_dataset is not None else {}),
             **({"videos": len(bags), "video_class_counts": dict(Counter(str(bag.label) for bag in bags)),
                 "supervision": VIDEO_MAX} if bags is not None else {}),
         }
@@ -63,6 +77,10 @@ def audit_inputs(job: ModelTrainingJob) -> dict[str, object]:
         raise ValueError("Train and Validation event IDs overlap")
     if contracts and contracts[0] != contracts[1]:
         raise ValueError("Fusion inputs must share one frozen Train calibration")
+    if clip_contracts and clip_contracts[0] != clip_contracts[1]:
+        raise ValueError("Matched Train/Validation must use the same arm and pinned export")
+    if job.input_profile is not None and job.initialize_from is None:
+        raise ValueError("Matched training requires the pinned Phase-3 warm start")
     initial_checkpoint = None
     if job.initialize_from is not None:
         if not job.initialize_from.is_file():
@@ -71,6 +89,8 @@ def audit_inputs(job: ModelTrainingJob) -> dict[str, object]:
             "path": job.initialize_from.as_posix(),
             "sha256": file_sha256(job.initialize_from),
         }
+        if job.input_profile is not None and initial_checkpoint["sha256"] != job.input_profile["initial_checkpoint_sha256"]:
+            raise ValueError("Matched initial checkpoint hash differs from the pinned reference")
     return {
         "name": job.name,
         "status": "passed",
@@ -142,9 +162,15 @@ def check_readiness(job: ModelTrainingJob) -> dict[str, object]:
                     raise ValueError("Readiness must exercise both event classes in each split and epoch")
                 if options.supervision == VIDEO_MAX:
                     is_train = split == "train"
-                    rows = read_csv_rows(job.train_manifest if is_train else job.validation_manifest)
+                    path = job.train_manifest if is_train else job.validation_manifest
+                    rows = read_csv_rows(path)
+                    if job.input_profile is not None:
+                        from seepat.training.matched_inputs import MatchedClipDataset
+
+                        rows = MatchedClipDataset(path, job.project_root, "train" if is_train else "val",
+                                                  job.input_profile, options.sequence_length, options.image_size).rows
                     plan = select_video_bags(
-                        video_bags(rows), options.seed + epoch["epoch"] if is_train else options.seed,
+                        video_bags(rows, job.input_profile is not None), options.seed + epoch["epoch"] if is_train else options.seed,
                         is_train, options.max_train_batches if is_train else options.max_validation_batches,
                     )
                     expected_bags = [{"video_id": bag.video_id, "label": bag.label,
@@ -159,6 +185,9 @@ def check_readiness(job: ModelTrainingJob) -> dict[str, object]:
                             or section.get("videos", {}).get("samples") != len(plan)):
                         raise ValueError("Video readiness must exercise verified complete bags, not partial events")
                     video_counts = section["videos"]
+                    if (job.input_profile is not None and path.name.startswith("candidate_")
+                            and section.get("context_clips_processed", 0) < 1):
+                        raise ValueError("Candidate readiness must actually exercise context clips in both splits")
                     if (video_counts["true_positive"] + video_counts["false_negative"] == 0
                             or video_counts["true_negative"] + video_counts["false_positive"] == 0):
                         raise ValueError("Video readiness must exercise both video classes in every split")
