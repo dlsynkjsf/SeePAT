@@ -1,0 +1,23 @@
+{
+  "workflow_config": "configs/phase5_coverage_pilot.yaml",
+  "stages_current": 1,
+  "stages_total": 1,
+  "all_current": true,
+  "preparation": [],
+  "model_training": [],
+  "evidence_stages": [],
+  "decisions": [],
+  "ablation_study": null,
+  "coverage_pilots": [
+    {
+      "name": "phase5-context-coverage-pilot",
+      "status": "current",
+      "gate": {
+        "adequate_sample": true,
+        "minimum_gain": 0.1,
+        "proceed_to_media_qa": true,
+        "decision": "review_bounded_media_QA"
+      }
+    }
+  ]
+}

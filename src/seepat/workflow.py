@@ -14,7 +14,7 @@ from seepat.artifacts import atomic_write_json, read_csv_rows, stable_id
 from seepat.config import PipelineSettings, load_pipeline_settings
 from seepat.coverage import CoveragePilotJob, run_coverage_pilot
 from seepat.decision import DecisionJob, run_decision_job
-from seepat.live_progress import ProgressCallback, WorkflowProgress
+from seepat.live_progress import ProgressCallback, WorkflowProgress, live_progress_path
 from seepat.pipeline import PIPELINE_VERSION, run_pipeline
 from seepat.preprocessing.augmentation import TraceAugmentationJob, run_trace_augmentation
 from seepat.preprocessing.contract import audit_preprocessing_contract
@@ -78,12 +78,24 @@ class WorkflowSettings:
     model_training_config: Path | None = None
     study_job: StudyJob | None = None
     coverage_pilot_jobs: tuple[CoveragePilotJob, ...] = ()
+    local_inference_jobs: tuple[Any, ...] = ()
 
 
 def _require_mapping(value: object, description: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise TypeError(f"{description} must be a YAML mapping")
     return value
+
+
+def _local_inference_api():
+    import sys
+
+    directory = str(Path(__file__).resolve().parents[3] / 'docs' / 'inference')
+    if directory not in sys.path:
+        sys.path.insert(0, directory)
+    import local_inference_workflow
+
+    return local_inference_workflow
 
 
 def load_workflow_settings(path: Path) -> WorkflowSettings:
@@ -334,10 +346,16 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
                for j in coverage_jobs):
             raise ValueError("Duplicate coverage pilot name/output")
         coverage_jobs.append(job)
-    if not (jobs or augmentation_jobs or numerical_calibration_jobs or model_training_jobs
+    local_jobs = _local_inference_api().load_local_jobs(config) if 'local_inference' in config else ()
+    if not (local_jobs or jobs or augmentation_jobs or numerical_calibration_jobs or model_training_jobs
             or decision_jobs or study_job or coverage_jobs):
         raise ValueError("Workflow configuration must contain at least one job")
     report_path = Path(str(config.get("report", "outputs/workflow_summary.json")))
+    for job in local_jobs:
+        protected = {job.freeze.resolve(), job.raw_inputs.resolve(), path.resolve()}
+        for target in (report_path.resolve(), live_progress_path(report_path).resolve()):
+            if target in protected or target.is_relative_to(job.output_dir.resolve()):
+                raise ValueError("Workflow report must stay outside local outputs and protected inputs")
     return WorkflowSettings(
         jobs=tuple(jobs),
         model_training_jobs=tuple(model_training_jobs),
@@ -348,6 +366,7 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
         model_training_config=training_config,
         study_job=study_job,
         coverage_pilot_jobs=tuple(coverage_jobs),
+        local_inference_jobs=local_jobs,
     )
 
 
@@ -829,6 +848,7 @@ def run_workflow(
         + [("model_training", job) for job in settings.model_training_jobs]
         + ([("ablation_study", settings.study_job)] if settings.study_job else [])
         + [("decisions", job) for job in settings.decision_jobs]
+        + [("local_inference", job) for job in settings.local_inference_jobs]
     )
     progress = WorkflowProgress(
         config_path, settings.report_path, len(tasks),
@@ -845,6 +865,8 @@ def run_workflow(
                 result = run_coverage_pilot(job, progress=progress)
             elif kind == "numerical_calibration":
                 result = run_numerical_calibration_job(job, progress=progress)
+            elif kind == "local_inference":
+                result = _local_inference_api().run_local_job(job, progress=progress)
             elif kind == "decisions":
                 result = run_decision_job(job, progress=progress)
             elif kind == "ablation_study":
@@ -860,6 +882,30 @@ def run_workflow(
     progress.finish(deferred=any(row["action"] == "deferred" for row in report.get("decisions", [])))
 
     return report
+
+
+def _local_readable_summary(row):
+    """Display sealed small reports only; upstream full verification is separate."""
+    import importlib.util
+
+    from seepat.artifacts import file_sha256
+
+    viewer = Path(__file__).resolve().parents[3] / "docs/inference/readable_xai.py"
+    viewer_bytes = viewer.read_bytes()
+    if hashlib.sha256(viewer_bytes).hexdigest() != "95512a723e6199b8dccfb39e3b070aee6c0ddd0006dcffdb40948c656511ca5e":
+        raise ValueError("Readable XAI source changed; review its release binding")
+    binding = row["summary"]["stage_summaries"]["explanation"]
+    summary = Path(binding["path"])
+    if summary.name != "summary.json" or file_sha256(summary) != binding["sha256"]:
+        raise ValueError("Explanation summary differs from completed workflow")
+    spec = importlib.util.spec_from_file_location("_seepat_readable_xai", viewer)
+    module = importlib.util.module_from_spec(spec)
+    # Execute exactly the bytes checked above, not a potentially stale .pyc.
+    exec(compile(viewer_bytes, str(viewer), "exec"), module.__dict__)  # noqa: S102 -- hash-pinned local viewer
+    text = module.render_saved_report(summary.parent, technical=True, paragraph_layout=True)
+    if viewer.read_bytes() != viewer_bytes or file_sha256(summary) != binding["sha256"]:
+        raise ValueError("Presentation source changed during display")
+    return text
 
 
 def format_workflow_summary(report: dict[str, object], report_path: Path) -> str:
@@ -888,6 +934,9 @@ def format_workflow_summary(report: dict[str, object], report_path: Path) -> str
         lines.append(
             f"  {row['name']:<34} {row['action']!s:<8} decisions {current}/3 complete"
         )
+    for row in report.get("local_inference", []):
+        lines.append(f"  {row['name']} | {row['action']} | local inference 3/3 complete")
+        lines.append(_local_readable_summary(row))
     lines.extend((f"Report: {report_path}", "#" * 72))
     return "\n".join(lines)
 

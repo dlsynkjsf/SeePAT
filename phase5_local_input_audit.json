@@ -1,0 +1,153 @@
+{
+  "read_only": true,
+  "jobs": [
+    {
+      "name": "phase5-control",
+      "status": "passed",
+      "inputs": {
+        "train": {
+          "events": 30515,
+          "class_counts": {
+            "0": 29787,
+            "1": 728
+          },
+          "source_groups": 4814,
+          "clip_kind_counts": {
+            "bilabial": 30515
+          },
+          "event_target_minus_one": "unavailable context annotation, not a class",
+          "videos": 4814,
+          "video_class_counts": {
+            "0": 1173,
+            "1": 3641
+          },
+          "supervision": "video_max"
+        },
+        "val": {
+          "events": 5789,
+          "class_counts": {
+            "0": 5637,
+            "1": 152
+          },
+          "source_groups": 957,
+          "clip_kind_counts": {
+            "bilabial": 5789
+          },
+          "event_target_minus_one": "unavailable context annotation, not a class",
+          "videos": 957,
+          "video_class_counts": {
+            "0": 240,
+            "1": 717
+          },
+          "supervision": "video_max"
+        }
+      },
+      "initial_checkpoint": {
+        "path": "outputs/training/fusion_phase3_v1/experiments/video_max/checkpoint_best.pt",
+        "sha256": "6bee2da4ab800638f14b0b28d1d5dce846015636e5489c240aa75b28f224c225"
+      },
+      "device": "cuda",
+      "pretrained": true,
+      "options": {
+        "epochs": 10,
+        "batch_size": 1,
+        "workers": 0,
+        "learning_rate": 0.0001,
+        "weight_decay": 0.01,
+        "gradient_accumulation_steps": 4,
+        "sequence_length": 16,
+        "image_size": 224,
+        "seed": 20260928,
+        "amp": false,
+        "freeze_backbone": true,
+        "unfreeze_final_backbone_stages": false,
+        "backbone_learning_rate": null,
+        "class_weighting": "balanced_global",
+        "positive_class_weight_ratio": null,
+        "loss_function": "cross_entropy",
+        "focal_gamma": 2,
+        "supervision": "video_max",
+        "selection_metric": "validation_video_balanced_accuracy",
+        "early_stopping_patience": 3,
+        "max_train_batches": null,
+        "max_validation_batches": null
+      }
+    },
+    {
+      "name": "phase5-candidate",
+      "status": "passed",
+      "inputs": {
+        "train": {
+          "events": 30515,
+          "class_counts": {
+            "0": 16065,
+            "-1": 14047,
+            "1": 403
+          },
+          "source_groups": 4814,
+          "clip_kind_counts": {
+            "bilabial": 16468,
+            "context": 14047
+          },
+          "event_target_minus_one": "unavailable context annotation, not a class",
+          "videos": 4814,
+          "video_class_counts": {
+            "0": 1173,
+            "1": 3641
+          },
+          "supervision": "video_max"
+        },
+        "val": {
+          "events": 5789,
+          "class_counts": {
+            "0": 3045,
+            "-1": 2652,
+            "1": 92
+          },
+          "source_groups": 957,
+          "clip_kind_counts": {
+            "bilabial": 3137,
+            "context": 2652
+          },
+          "event_target_minus_one": "unavailable context annotation, not a class",
+          "videos": 957,
+          "video_class_counts": {
+            "0": 240,
+            "1": 717
+          },
+          "supervision": "video_max"
+        }
+      },
+      "initial_checkpoint": {
+        "path": "outputs/training/fusion_phase3_v1/experiments/video_max/checkpoint_best.pt",
+        "sha256": "6bee2da4ab800638f14b0b28d1d5dce846015636e5489c240aa75b28f224c225"
+      },
+      "device": "cuda",
+      "pretrained": true,
+      "options": {
+        "epochs": 10,
+        "batch_size": 1,
+        "workers": 0,
+        "learning_rate": 0.0001,
+        "weight_decay": 0.01,
+        "gradient_accumulation_steps": 4,
+        "sequence_length": 16,
+        "image_size": 224,
+        "seed": 20260928,
+        "amp": false,
+        "freeze_backbone": true,
+        "unfreeze_final_backbone_stages": false,
+        "backbone_learning_rate": null,
+        "class_weighting": "balanced_global",
+        "positive_class_weight_ratio": null,
+        "loss_function": "cross_entropy",
+        "focal_gamma": 2,
+        "supervision": "video_max",
+        "selection_metric": "validation_video_balanced_accuracy",
+        "early_stopping_patience": 3,
+        "max_train_batches": null,
+        "max_validation_batches": null
+      }
+    }
+  ]
+}

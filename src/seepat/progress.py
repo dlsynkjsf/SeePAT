@@ -277,9 +277,16 @@ def read_workflow_progress(config_path: Path) -> dict[str, object]:
         current_stages += int(current)
         study = {"name": settings.study_job.name, "phase": settings.study_job.phase,
                  "status": "current" if current else "pending_or_stale"}
+    local_inference = []
+    for job in getattr(settings, "local_inference_jobs", ()):
+        from seepat.workflow import _local_inference_api
+
+        status = _local_inference_api().local_job_status(job)
+        local_inference.append(status)
+        current_stages += sum(value == "current" for value in status["stages"].values())
     total_stages = (2 * len(settings.jobs) + len(settings.model_training_jobs)
                     + len(evidence_stages) + 3 * len(decisions) + int(study is not None)
-                    + len(coverage_pilots))
+                    + len(coverage_pilots) + 3 * len(local_inference))
     return {
         "workflow_config": config_path.as_posix(),
         "stages_current": current_stages,
@@ -291,6 +298,7 @@ def read_workflow_progress(config_path: Path) -> dict[str, object]:
         "decisions": decisions,
         "ablation_study": study,
         **({"coverage_pilots": coverage_pilots} if coverage_pilots else {}),
+        **({"local_inference": local_inference} if local_inference else {}),
     }
 
 

@@ -10,6 +10,23 @@ speech and lip movement. It focuses on the bilabial consonants `/m/`, `/b/`, and
 the phoneme timing and the expected lip closure can provide evidence of video or
 audio manipulation.
 
+Local inference now has an opt-in `local_inference` workflow section connecting
+raw-video preparation, frozen prediction and concise offline reports. Run it
+through `python -m seepat.workflow`; use `python -m seepat.progress` for tracking
+and verification. It requires the sibling `docs/inference/` companions and a
+reviewed local freeze/input inventory. New reports and terminal summaries use a
+plain-language authentic (real)/manipulated (fake) paragraph, followed by separate
+technical details. Existing reports stay unchanged; old execution profiles must
+not be repinned or rerun after a source update. See the
+[completed four-video local check](../docs/inference/CLI_ACCEPTANCE_RESULTS.md):
+12/12 stages verified. Broader human review and detection quality remain open;
+this technical check is not an accuracy benchmark.
+Deepfake-Eval is locked. The preparation freeze does not enable execution.
+
+Phase-5 training and local return installation are complete; see
+[development results and limitations](../PHASE5_RESULTS.md). Historical
+preflight/pending descriptions below are retained for context, not current status.
+
 The workflow preserves existing preprocessing and adds separate, verified raw
 VILD and face-size measurements. Scale regression and Pearson analysis use
 label-independent Train references; phoneme expectations use genuine Train
