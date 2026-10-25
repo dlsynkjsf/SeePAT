@@ -11,6 +11,7 @@ from typing import Any
 import yaml
 
 from seepat.artifacts import atomic_write_json, read_csv_rows, stable_id
+from seepat.artifacts import file_sha256 as _sha256
 from seepat.config import PipelineSettings, load_pipeline_settings
 from seepat.coverage import CoveragePilotJob, run_coverage_pilot
 from seepat.decision import DecisionJob, run_decision_job
@@ -375,14 +376,6 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise TypeError(f"Expected a JSON object in {path}")
     return value
-
-
-def _sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(chunk_size):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def preprocessing_outputs_are_current(

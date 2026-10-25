@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -33,12 +32,7 @@ def _portable_path(value: str) -> str:
     return value.strip().replace("\\", "/")
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+_sha256 = file_sha256
 
 
 def _float_text(value: str) -> str:

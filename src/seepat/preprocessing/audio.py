@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import importlib.util
 import json
 import os
@@ -15,6 +14,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from seepat.artifacts import atomic_write_json
+from seepat.artifacts import file_sha256 as _sha256
 from seepat.config import AudioEnhancementSettings
 from seepat.preprocessing.media import extract_mono_audio, find_media_binary
 
@@ -78,14 +78,6 @@ class DeepFilterResult:
     cache_hit: bool
     fallback_applied: bool
     max_sustained_attenuation_s: float | None
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _installed_version(package: str) -> str:

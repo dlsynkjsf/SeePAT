@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import random
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from itertools import islice
@@ -17,6 +17,7 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader, Dataset, Subset
 
 from seepat.artifacts import atomic_write_json
+from seepat.artifacts import file_sha256 as _sha256
 from seepat.live_progress import ProgressCallback
 from seepat.models.cnn_temporal import (
     EfficientNetTempCNNEventClassifier,
@@ -121,6 +122,13 @@ def build_event_classifier(
             use_evidence=model_name == FUSION_MODEL,
         )
     raise ValueError(f"Unsupported training model: {model_name!r}")
+
+
+@dataclass(frozen=True)
+class VideoObjective:
+    name: str
+    contract: dict[str, object]
+    train_epoch: Callable[..., dict[str, Any]]
 
 
 @dataclass(frozen=True)
@@ -573,6 +581,7 @@ def _print_epoch_summary(
     train_loss: float,
     validation: dict[str, object],
     improved: bool,
+    objective_name: str = "complete-video maximum",
 ) -> None:
     selection = validation["selection"]
     videos = validation["videos_at_selection_threshold"]
@@ -580,7 +589,7 @@ def _print_epoch_summary(
     print("\n" + "=" * 72)
     print(f"EPOCH {epoch}/{epochs}  |  {'NEW BEST' if improved else 'no improvement'}")
     if validation.get("loss_unit") == "video":
-        print("Objective: complete-video maximum | event metrics are diagnostic, not localization")
+        print(f"Objective: {objective_name} | event metrics are diagnostic, not localization")
     print(
         f"Updates {updates:,}  |  skipped {skipped:,}  |  "
         f"train loss {train_loss:.6f}  |  val loss {float(validation['loss']):.6f}"
@@ -627,8 +636,14 @@ def train_model(
     resume_contract: dict[str, object],
     resume_from: Path | None = None,
     progress: ProgressCallback | None = None,
+    *,
+    video_objective: VideoObjective | None = None,
 ) -> dict[str, object]:
     options.validate()
+    if video_objective is not None and options.supervision != VIDEO_MAX:
+        raise ValueError("A video objective requires complete-video supervision")
+    supervision_contract = video_objective.contract if video_objective else VIDEO_SUPERVISION_CONTRACT
+    epoch_runner = video_objective.train_epoch if video_objective else train_video_epoch
     train_rows = getattr(train_dataset, "rows", None)
     validation_rows = getattr(validation_dataset, "rows", None)
     if not isinstance(train_rows, list) or not isinstance(validation_rows, list):
@@ -637,13 +652,13 @@ def train_model(
     if overlapping_groups:
         examples = ", ".join(sorted(overlapping_groups)[:5])
         raise ValueError(f"Source-group leakage between train and validation: {examples}")
-    expected_supervision = VIDEO_SUPERVISION_CONTRACT if options.supervision == VIDEO_MAX else None
+    expected_supervision = supervision_contract if options.supervision == VIDEO_MAX else None
     if resume_contract.get("supervision") is not None and resume_contract["supervision"] != expected_supervision:
         raise ValueError("Declared supervision contract differs from training options")
 
     resume_contract = {
         **resume_contract,
-        **({"supervision": dict(VIDEO_SUPERVISION_CONTRACT)}
+        **({"supervision": dict(supervision_contract)}
            if options.supervision == VIDEO_MAX else {}),
         **({"seed": options.seed} if options.supervision == VIDEO_MAX else {}),
         "optimizer": {
@@ -899,7 +914,7 @@ def train_model(
             train_probabilities: list[float] = []
             video_train = None
             if train_plan is not None:
-                video_train = train_video_epoch(
+                video_train = epoch_runner(
                     model, train_loader, train_plan, device, _forward_logits, loss_function,
                     optimizer, options.gradient_accumulation_steps, trainable_parameters,
                     progress, f"train videos epoch {epoch}/{options.epochs}",
@@ -1059,6 +1074,7 @@ def train_model(
                 train_loss,
                 validation,
                 improved,
+                objective_name=video_objective.name if video_objective else "complete-video maximum",
             )
 
             checkpoint = _checkpoint(
@@ -1148,14 +1164,6 @@ def train_model(
     atomic_write_json(output_dir / "run.json", run_record)
     _print_training_summary(run_record)
     return run_record
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _device(name: str) -> torch.device:
