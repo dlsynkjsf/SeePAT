@@ -91,7 +91,7 @@ def _require_mapping(value: object, description: str) -> dict[str, Any]:
 def _local_inference_api():
     import sys
 
-    directory = str(Path(__file__).resolve().parents[3] / 'docs' / 'inference')
+    directory = str(Path(__file__).resolve().parents[3] / 'info dump' / 'docs' / 'inference')
     if directory not in sys.path:
         sys.path.insert(0, directory)
     import local_inference_workflow
@@ -883,7 +883,7 @@ def _local_readable_summary(row):
 
     from seepat.artifacts import file_sha256
 
-    viewer = Path(__file__).resolve().parents[3] / "docs/inference/readable_xai.py"
+    viewer = Path(__file__).resolve().parents[3] / "info dump/docs/inference/readable_xai.py"
     viewer_bytes = viewer.read_bytes()
     if hashlib.sha256(viewer_bytes).hexdigest() != "95512a723e6199b8dccfb39e3b070aee6c0ddd0006dcffdb40948c656511ca5e":
         raise ValueError("Readable XAI source changed; review its release binding")

@@ -361,6 +361,10 @@ def _forward_logits(
     batch: dict[str, Any],
     device: torch.device,
 ) -> torch.Tensor:
+    if bool(getattr(model, "uses_timing_features", False)):
+        from seepat.models.sequence_evidence import forward_sequence_model
+
+        return forward_sequence_model(model, videos, batch, device)
     kwargs: dict[str, torch.Tensor] = {}
     if bool(getattr(model, "uses_frame_mask", False)):
         frame_mask = batch.get("frame_mask")

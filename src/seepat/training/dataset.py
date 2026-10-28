@@ -188,6 +188,7 @@ class MouthEventDataset:
         return {
             "video": video,
             "frame_mask": torch.tensor(frame_mask, dtype=torch.bool),
+            "decoded_frame_count": len(frames),
             "features": torch.tensor(feature_values, dtype=torch.float32),
             "feature_mask": torch.tensor(feature_mask, dtype=torch.bool),
             "evidence_features": torch.tensor(evidence_values, dtype=torch.float32),

@@ -197,6 +197,7 @@ class MatchedClipDataset:
         return {
             "video": torch.from_numpy(np.ascontiguousarray(array)).permute(3, 0, 1, 2).float().div_(255),
             "frame_mask": torch.tensor(window["frame_mask"], dtype=torch.bool),
+            "decoded_frame_count": len(frames),
             "features": torch.zeros(len(FEATURE_FIELDS)), "feature_mask": torch.zeros(len(FEATURE_FIELDS), dtype=torch.bool),
             "evidence_features": torch.zeros(len(FUSION_EVIDENCE_FIELDS)),
             "evidence_feature_mask": torch.zeros(len(FUSION_EVIDENCE_FIELDS), dtype=torch.bool),

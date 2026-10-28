@@ -55,6 +55,10 @@ def state_digest(model):
 
     digest = hashlib.sha256()
     for name, tensor in sorted(model.state_dict().items()):
+        if not isinstance(tensor, torch.Tensor):
+            digest.update(f"{name}|metadata|".encode())
+            digest.update(json.dumps(tensor, sort_keys=True, separators=(",", ":"), allow_nan=False).encode())
+            continue
         value = tensor.detach().cpu().contiguous()
         digest.update(f"{name}|{value.dtype}|{tuple(value.shape)}".encode())
         digest.update(value.reshape(-1).view(torch.uint8).numpy().tobytes())
@@ -90,7 +94,7 @@ def check_history(run, history, train, validation, options):
 
 
 
-def watch_progress(path):
+def watch_progress(path, label="CONTEXT COMPARISON"):
     import time
 
     from seepat.live_progress import format_live_progress
@@ -105,7 +109,7 @@ def watch_progress(path):
                         raise ValueError("Worker stopped without completing; preserve outputs and logs")
                     return record
             else:
-                print("CONTEXT COMPARISON | waiting for worker; this does not start it", flush=True)
+                print(f"{label} | waiting for worker; this does not start it", flush=True)
             time.sleep(5)
     except KeyboardInterrupt:
         print("Watcher stopped; worker was not stopped.", flush=True)
