@@ -205,6 +205,8 @@ def _score_video(
         )
         reason = ""
     output = []
+    forest_rows: list[dict[str, object]] = []
+    forest_residuals: list[float] = []
     for row in rows:
         minimum = _event_minimum(trace, row)
         scored = dict(row)
@@ -251,17 +253,22 @@ def _score_video(
                     (residual - stats["mean_residual_px"]) / stats["scale_residual_px"], 9
                 )
             if forest is not None:
-                scored.update(
-                    {
-                        # sklearn returns the negative of the paper's path-length anomaly score.
-                        "isolation_forest_anomaly_score": round(
-                            float(-forest.score_samples([[residual]])[0]), 9
-                        ),
-                        "isolation_forest_available": True,
-                        "isolation_forest_unavailable_reason": "",
-                    }
-                )
+                forest_rows.append(scored)
+                forest_residuals.append(residual)
         output.append(scored)
+    if forest is not None and forest_rows:
+        # Preserve one fitted forest per input video, but score its event residuals
+        # together. Missing event measurements never enter this matrix.
+        scores = forest.score_samples(np.asarray(forest_residuals).reshape(-1, 1))
+        for scored, score in zip(forest_rows, scores, strict=True):
+            scored.update(
+                {
+                    # sklearn returns the negative of the paper's path-length anomaly score.
+                    "isolation_forest_anomaly_score": round(float(-score), 9),
+                    "isolation_forest_available": True,
+                    "isolation_forest_unavailable_reason": "",
+                }
+            )
     return output, {
         "video_id": rows[0]["video_id"],
         "reference_frames": len(samples),

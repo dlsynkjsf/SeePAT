@@ -113,6 +113,39 @@ def test_contexts_are_excluded_only_from_event_metrics():
     assert metrics["unlabelled_context_clips_excluded"] == 1
 
 
+def test_matched_pixel_cache_and_metadata_api_preserve_both_kinds(exported, tmp_path, monkeypatch):
+    import torch
+
+    from seepat.training import clip_cache
+
+    _, directory, profile = exported
+    original = MatchedClipDataset(directory / "candidate_train.csv", tmp_path, "train", profile,
+                                  image_size=8)
+    cached = MatchedClipDataset(directory / "candidate_train.csv", tmp_path, "train", profile,
+                                image_size=8, clip_cache_dir=tmp_path / "pixel-cache")
+    expected = [original[i] for i in range(len(original))]
+    for index, reference in enumerate(expected):
+        sample = cached[index]
+        assert sample.keys() == reference.keys()
+        for key, value in reference.items():
+            assert torch.equal(value, sample[key]) if torch.is_tensor(value) else value == sample[key]
+        path, frozen_hash, frame_mask = cached.clip_source(index)
+        assert path.is_file()
+        assert (frozen_hash is not None) == (sample["kind"] == "context")
+        assert (frame_mask is not None) == (sample["kind"] == "context")
+
+    def no_decode(*_args):
+        raise AssertionError("A warmed cache or metadata lookup decoded pixels")
+
+    monkeypatch.setattr(clip_cache, "_read_selected", no_decode)
+    for index, reference in enumerate(expected):
+        assert torch.equal(cached[index]["video"], reference["video"])
+        metadata = cached.sample_metadata(index)
+        assert metadata.keys() == reference.keys() - {"video", "frame_mask", "decoded_frame_count"}
+        for key, value in metadata.items():
+            assert torch.equal(value, reference[key]) if torch.is_tensor(value) else value == reference[key]
+
+
 def test_tampered_record_or_profile_fails_before_decode(exported, tmp_path):
     _, directory, profile = exported
     bad = {**profile, "summary_sha256": "1" * 64}
@@ -133,7 +166,10 @@ def options(epochs=1, limited=False):
                            max_validation_batches=2 if limited else None)
 
 
-def test_matched_warm_start_resume_readiness_inner_threshold_and_context_trace(exported, tmp_path, monkeypatch):
+@pytest.mark.parametrize('cached_runtime', [False, True])
+def test_matched_warm_start_resume_readiness_inner_threshold_and_context_trace(
+    exported, tmp_path, monkeypatch, cached_runtime,
+):
     paths, directory, profile = exported
     monkeypatch.setattr("seepat.training.train.build_event_classifier", lambda **kw: _tiny_model(freeze_backbone=kw["freeze_backbone"]))
     monkeypatch.setattr("seepat.verdict.build_event_classifier", lambda **kw: _tiny_model(freeze_backbone=kw["freeze_backbone"]))
@@ -145,6 +181,9 @@ def test_matched_warm_start_resume_readiness_inner_threshold_and_context_trace(e
     job = ModelTrainingJob("matched-ready", directory / "candidate_train.csv", directory / "candidate_val.csv",
                            tmp_path / "readiness", tmp_path, "cpu", False, asdict(options(limited=True)),
                            FUSION_MODEL, initialize_from=initial, input_profile=profile)
+    if cached_runtime:
+        job = replace(job, runtime={'feature_cache_dir': str(tmp_path / 'features'),
+                                     'persistent_train_workers': True})
     assert audit_inputs(job)["status"] == "passed"
     first = run_model_training_job(job)["summary"]
     assert first["global_step"] == 1  # Reset optimizer; do not resume the source experiment.
@@ -155,6 +194,10 @@ def test_matched_warm_start_resume_readiness_inner_threshold_and_context_trace(e
     resumed = run_model_training_job(job)
     assert resumed["action"] == "resumed" and resumed["summary"]["global_step"] == 2
     assert check_readiness(job)["status"] == "passed"
+    if cached_runtime:
+        wrong_runtime = replace(job, runtime={**job.runtime, 'persistent_train_workers': False})
+        assert check_readiness(wrong_runtime)['status'] == 'pending'
+        assert 'execution controls differ' in check_readiness(wrong_runtime)['reason']
     assert model_training_outputs_are_current(job)
     wrong_arm = replace(job, train_manifest=directory / "control_train.csv",
                         validation_manifest=directory / "control_val.csv")

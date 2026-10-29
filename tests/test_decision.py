@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -304,3 +305,25 @@ def test_explanation_detects_source_changes_during_generation(job):
     with pytest.raises(ValueError, match="changed during"):
         generate_forensic_trace(directory, path, client=ChangingClient())
     assert not path.exists()
+
+
+def test_decision_passes_runtime_loader_options_without_invalidating_results(job, monkeypatch):
+    calls = []
+    score_events = verdict._score_events
+
+    def record(*args, **kwargs):
+        calls.append(kwargs.copy())
+        return score_events(*args, **{**kwargs, "workers": 0, "pin_memory": False})
+
+    monkeypatch.setattr(verdict, "_score_events", record)
+    tuned = replace(job, workers=2, pin_memory=True)
+    assert run_decision_job(tuned)["action"] == "ran"
+    assert calls == [{"workers": 2, "pin_memory": True}]
+    assert set(decision_stage_status(job).values()) == {"current"}
+    assert run_decision_job(job)["action"] == "skipped"
+
+
+@pytest.mark.parametrize("kwargs", [{"workers": -1}, {"workers": True}, {"pin_memory": "yes"}])
+def test_decision_rejects_invalid_loader_configuration(job, kwargs):
+    with pytest.raises((TypeError, ValueError), match="workers|pin_memory"):
+        replace(job, **kwargs)

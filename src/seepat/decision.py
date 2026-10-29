@@ -21,6 +21,14 @@ class DecisionJob:
     batch_size: int = 1
     threshold_artifact: Path | None = None
     input_profile: dict[str, str] | None = None
+    workers: int = 0
+    pin_memory: bool = False
+
+    def __post_init__(self) -> None:
+        if isinstance(self.workers, bool) or not isinstance(self.workers, int) or self.workers < 0:
+            raise ValueError("Decision workers must be a nonnegative integer")
+        if not isinstance(self.pin_memory, bool):
+            raise TypeError("Decision pin_memory must be a boolean")
 
 
 def decision_stage_status(job: DecisionJob) -> dict[str, str]:
@@ -110,6 +118,7 @@ def run_decision_job(job: DecisionJob, progress: ProgressCallback | None = None)
             "manifest_path": job.validation_manifest, "checkpoint_path": job.checkpoint,
             "project_root": job.project_root, "device_name": job.device,
             "batch_size": job.batch_size, "progress": progress,
+            "workers": job.workers, "pin_memory": job.pin_memory,
         }
         if stage == "threshold":
             if transfer:

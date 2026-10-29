@@ -15,6 +15,8 @@ class ExpandedContextDataset(MatchedClipDataset):
     def __init__(self, bilabials, index, records, project_root, export_root):
         self.root, export_root = Path(project_root).resolve(), Path(export_root).resolve()
         self.image_size, self.bilabials = 224, bilabials
+        self.sequence_length = 16
+        self.clip_cache_dir = getattr(bilabials, "clip_cache_dir", None)
         self.calibration_contract = bilabials.calibration_contract
         self.base_indices = {row["event_id"]: i for i, row in enumerate(bilabials.rows)}
         if len(self.base_indices) != len(bilabials.rows):

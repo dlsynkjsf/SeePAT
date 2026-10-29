@@ -587,3 +587,72 @@ def test_nonfinite_video_logits_fail_before_update(value):
                 lambda *_args: torch.tensor([[0.0, value]]),
             )
         )
+
+
+@pytest.mark.parametrize("with_context", [False, True])
+def test_no_grad_video_scoring_matches_streamed_reference(with_context):
+    dataset = BagDataset("val")
+    if with_context:
+        dataset.rows[3].update(kind="context", class_id="-1", phoneme="")
+        dataset.samples[3].update(
+            kind="context", label=torch.tensor(-1), phoneme="",
+            features=torch.zeros(8), feature_mask=torch.zeros(8, dtype=torch.bool),
+            evidence_features=torch.zeros(7), evidence_feature_mask=torch.zeros(7, dtype=torch.bool),
+        )
+    bags = video_bags(dataset.rows, allow_context=with_context)
+    model = BagClassifier().eval()
+    device = torch.device("cpu")
+    expected = list(scored_video_bags(
+        model, video_loader(dataset, bags, 0, device, 1), bags, device, _forward_logits,
+    ))
+    with torch.inference_mode():
+        actual = list(scored_video_bags(
+            model, video_loader(dataset, bags, 0, device, 1), bags, device, _forward_logits,
+        ))
+    for first, second in zip(expected, actual, strict=True):
+        torch.testing.assert_close(first["logits"], second["logits"], atol=0, rtol=0)
+        assert first["event_labels"] == second["event_labels"]
+        assert first["event_probabilities"] == second["event_probabilities"]
+        assert not second["logits"].requires_grad
+        assert first["first_batch"]["event_id"] == second["first_batch"]["event_id"]
+
+
+def test_no_grad_video_scoring_keeps_first_tied_logit_margin():
+    dataset = BagDataset("val")
+    bag = video_bags(dataset.rows)[0]
+    values = iter([torch.tensor([[0.0, 1.0]]), torch.tensor([[1.0, 2.0]])])
+    device = torch.device("cpu")
+    with torch.inference_mode():
+        result, = scored_video_bags(
+            BagClassifier(), video_loader(dataset, [bag], 0, device, 1), [bag], device,
+            lambda *_: next(values),
+        )
+    torch.testing.assert_close(result["logits"], torch.tensor([[0.0, 1.0]]), atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_no_grad_video_scoring_rejects_nonfinite_logits(value):
+    dataset = BagDataset("val")
+    bag = video_bags(dataset.rows)[0]
+    device = torch.device("cpu")
+    with torch.inference_mode(), pytest.raises(FloatingPointError, match="finite binary event logits"):
+        list(scored_video_bags(
+            BagClassifier(), video_loader(dataset, [bag], 0, device, 1), [bag], device,
+            lambda *_: torch.tensor([[0.0, value]]),
+        ))
+
+
+def test_no_grad_video_scoring_rejects_nonfinite_margin_and_wrong_membership():
+    dataset = BagDataset("val")
+    bag = video_bags(dataset.rows)[0]
+    device = torch.device("cpu")
+    with torch.inference_mode(), pytest.raises(FloatingPointError, match="margin is not finite"):
+        list(scored_video_bags(
+            BagClassifier(), video_loader(dataset, [bag], 0, device, 1), [bag], device,
+            lambda *_: torch.tensor([[-3e38, 3e38]]),
+        ))
+    with torch.inference_mode(), pytest.raises(ValueError, match="membership"):
+        list(scored_video_bags(
+            BagClassifier(), DataLoader(Subset(dataset, [0, 0]), batch_size=1), [bag], device,
+            _forward_logits,
+        ))

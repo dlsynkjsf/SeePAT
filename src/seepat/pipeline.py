@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from contextlib import ExitStack
 from pathlib import Path
 
 from seepat.artifacts import (
@@ -172,27 +173,10 @@ def run_pipeline(
     if progress is not None:
         progress("preprocess videos", 0, len(manifest_rows), "")
 
-    transcriber = WhisperTranscriber(
-        model_name=preprocessing.whisper_model,
-        device=preprocessing.whisper_device,
-        compute_type=preprocessing.whisper_compute_type,
-    )
-    aligner = MfaDockerAligner(
-        image=preprocessing.mfa_docker_image,
-        cache_dir=preprocessing.mfa_cache_dir,
-        dictionary=preprocessing.mfa_dictionary,
-        acoustic_model=preprocessing.mfa_acoustic_model,
-    )
-
     video_reports: list[dict[str, object]] = []
     all_events: list[dict[str, object]] = []
-    with MouthEventAnalyzer() as mouth_analyzer:
-        processor = PilotVideoProcessor(
-            settings=settings,
-            transcriber=transcriber,
-            aligner=aligner,
-            mouth_analyzer=mouth_analyzer,
-        )
+    processor: PilotVideoProcessor | None = None
+    with ExitStack() as resources:
         for index, manifest_row in enumerate(manifest_rows):
             video_id = stable_id(manifest_row["file"])
             if progress is not None:
@@ -209,6 +193,28 @@ def run_pipeline(
                 video_reports.append(cached["video_report"])
                 all_events.extend(cached["events"])
                 continue
+
+            # A verified cache-only run needs none of the model/Docker dependencies.
+            # Initialize once on the first miss and retain deterministic input order.
+            if processor is None:
+                transcriber = WhisperTranscriber(
+                    model_name=preprocessing.whisper_model,
+                    device=preprocessing.whisper_device,
+                    compute_type=preprocessing.whisper_compute_type,
+                )
+                aligner = MfaDockerAligner(
+                    image=preprocessing.mfa_docker_image,
+                    cache_dir=preprocessing.mfa_cache_dir,
+                    dictionary=preprocessing.mfa_dictionary,
+                    acoustic_model=preprocessing.mfa_acoustic_model,
+                )
+                mouth_analyzer = resources.enter_context(MouthEventAnalyzer())
+                processor = PilotVideoProcessor(
+                    settings=settings,
+                    transcriber=transcriber,
+                    aligner=aligner,
+                    mouth_analyzer=mouth_analyzer,
+                )
 
             work_dir.mkdir(parents=True, exist_ok=True)
             report, events = processor.process(

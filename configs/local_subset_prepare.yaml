@@ -1,0 +1,29 @@
+# New local-subset experiment; does not reproduce a frozen Phase-5 context run.
+# Run from SeePAT-feat-improvement. Uploaded media and original profiles remain unchanged.
+report: outputs/local_subset_v1/workflow_prepare_summary.json
+jobs:
+- name: local-subset-train
+  pipeline_config: configs/local_subset_train.yaml
+  manifest_output_dir: data/training/local_subset_v1/train
+- name: local-subset-val
+  pipeline_config: configs/local_subset_val.yaml
+  manifest_output_dir: data/training/local_subset_v1/val
+trace_augmentation:
+- name: local-subset-train-traces
+  manifest: data/training/local_subset_v1/train/events_train.csv
+  extracted_root: ../Videos_Dataset/SeePAT_dataset_5000_train_1000_val/train
+  output_dir: outputs/local_subset_v1/trace_augmentation/train
+- name: local-subset-val-traces
+  manifest: data/training/local_subset_v1/val/events_val.csv
+  extracted_root: ../Videos_Dataset/SeePAT_dataset_5000_train_1000_val/val
+  output_dir: outputs/local_subset_v1/trace_augmentation/val
+numerical_calibration:
+  name: local-subset-train-calibration
+  train_manifest: outputs/local_subset_v1/trace_augmentation/train/events_augmented.csv
+  score_manifests:
+    train: outputs/local_subset_v1/trace_augmentation/train/events_augmented.csv
+    val: outputs/local_subset_v1/trace_augmentation/val/events_augmented.csv
+  output_dir: outputs/local_subset_v1/calibration
+  min_video_reference_frames: 16
+  isolation_trees: 100
+  random_seed: 20260908

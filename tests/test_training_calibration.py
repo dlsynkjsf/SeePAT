@@ -225,3 +225,64 @@ def test_calibration_rejects_corrupt_frozen_artifact(tmp_path):
     path.write_text(json.dumps(artifact))
     with pytest.raises(ValueError, match="hash mismatch"):
         cal.score_manifests_with_calibration(path, {"train": train}, tmp_path / "scored")
+
+
+def test_video_scores_residuals_once_with_scalar_score_parity_and_missing_measurements(
+    tmp_path, monkeypatch,
+):
+    first = make_row(tmp_path, "a")
+    artifact = cal._fit_population([first], OPTIONS)
+    rows = [first, {**first, "event_id": "a-1"}, {**first, "event_id": "a-2"}]
+    trace = cal.augmented_trace_for_row(first)
+    minima = {"a-0": trace["frames"][20], "a-1": trace["frames"][25], "a-2": None}
+    regression = artifact["regression"]["global"]
+    references = cal.reference_samples(trace, OPTIONS)
+    forest = cal.IsolationForest(
+        n_estimators=OPTIONS.isolation_trees,
+        contamination="auto",
+        random_state=OPTIONS.random_seed,
+        n_jobs=1,
+    ).fit(np.asarray([
+        cal._residual(bbox, raw, regression) for bbox, raw in references
+    ]).reshape(-1, 1))
+    residuals = [cal._residual(float(minimum["face_bbox_size_px"]),
+                              float(minimum["raw_vild_px"]), regression)
+                 for minimum in (minima["a-0"], minima["a-1"])]
+    expected = [round(float(-forest.score_samples([[value]])[0]), 9) for value in residuals]
+    calls = []
+    original = cal.IsolationForest.score_samples
+
+    def score_samples(self, values):
+        calls.append(np.asarray(values).copy())
+        return original(self, values)
+
+    monkeypatch.setattr(cal.IsolationForest, "score_samples", score_samples)
+    monkeypatch.setattr(cal, "_event_minimum", lambda _trace, row: minima[row["event_id"]])
+
+    scored, diagnostic = cal._score_video(rows, artifact, OPTIONS)
+
+    assert len(calls) == 1
+    np.testing.assert_array_equal(calls[0], np.asarray(residuals).reshape(-1, 1))
+    assert [row["event_id"] for row in scored] == [row["event_id"] for row in rows]
+    assert [row["isolation_forest_anomaly_score"] for row in scored[:2]] == expected
+    assert all(row["isolation_forest_available"] is True for row in scored[:2])
+    assert scored[2]["isolation_forest_anomaly_score"] == ""
+    assert scored[2]["isolation_forest_available"] is False
+    assert scored[2]["isolation_forest_unavailable_reason"] == "no_valid_event_measurements"
+    assert diagnostic["forest_fitted"] is True
+
+
+def test_fitted_video_without_valid_event_measurements_does_not_score(tmp_path, monkeypatch):
+    row = make_row(tmp_path, "a")
+    artifact = cal._fit_population([row], OPTIONS)
+    monkeypatch.setattr(cal, "_event_minimum", lambda *_: None)
+
+    def unexpected(*_args, **_kwargs):
+        raise AssertionError("an empty event residual matrix must not be scored")
+
+    monkeypatch.setattr(cal.IsolationForest, "score_samples", unexpected)
+    scored, diagnostic = cal._score_video([row], artifact, OPTIONS)
+
+    assert diagnostic["forest_fitted"] is True
+    assert scored[0]["isolation_forest_anomaly_score"] == ""
+    assert scored[0]["isolation_forest_unavailable_reason"] == "no_valid_event_measurements"

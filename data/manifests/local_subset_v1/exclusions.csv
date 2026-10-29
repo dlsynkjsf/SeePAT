@@ -1,0 +1,3 @@
+split,file,reason,original_source_group,normalized_source_group,original,retained_file
+train,vox_celeb_2/id03298/E0Iqx5abf64/00183/real.mp4,train_validation_source_overlap,VoxCeleb2/dev/mp4/id03298/E0Iqx5abf64/00183.mp4,VoxCeleb2/dev/mp4/id03298/E0Iqx5abf64/00183.mp4,VoxCeleb2/dev/mp4/id03298/E0Iqx5abf64/00183.mp4,vox_celeb_2/id03298/E0Iqx5abf64/00183/real_p1.mp4
+train,vox_celeb_2/id01031/OExpnjVrjn0/00037/real.mp4,duplicate_train_source_group,VoxCeleb2/dev/mp4/id01031/OExpnjVrjn0/00037.mp4,VoxCeleb2/dev/mp4/id01031/OExpnjVrjn0/00037.mp4,VoxCeleb2/dev/mp4/id01031/OExpnjVrjn0/00037.mp4,vox_celeb_2/id01031/OExpnjVrjn0/00037/real_p1.mp4

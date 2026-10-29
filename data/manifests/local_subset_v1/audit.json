@@ -1,0 +1,69 @@
+{
+  "canonical_rule": "strip surrounding whitespace, convert backslash to slash, collapse repeated slashes, then remove only leading vox_celeb_2/ directly before VoxCeleb2/; prefix comparison is case-insensitive; keep canonical VoxCeleb2 casing and identifiers",
+  "dataset_root": "C:\\Users\\cjpin\\OneDrive\\Desktop\\Thesis\\Videos_Dataset\\SeePAT_dataset_5000_train_1000_val",
+  "duplicate_winner": "lowest selection_order, then file path; retain input row order",
+  "exclusion_counts": {
+    "duplicate_train_source_group": 1,
+    "train_validation_source_overlap": 1
+  },
+  "input_canonical_source_groups": {
+    "train": 4999,
+    "val": 1000
+  },
+  "input_canonical_source_overlap": 1,
+  "input_media_bytes": {
+    "train": 3139503070,
+    "val": 752567524
+  },
+  "input_recorded_source_groups": {
+    "train": 5000,
+    "val": 1000
+  },
+  "input_rows": {
+    "train": 5000,
+    "val": 1000
+  },
+  "input_sha256": {
+    "train_subset5000.csv": "08409a3cd843cc43a2ec1f38e7fdd9960be8672251b18bb5e915ee96f1c034ce",
+    "val_subset1000.csv": "fdfea30b8c4370a8c30eb2cad07244343127994a1c39c0218eb637cc2c01e8dc",
+    "videos.csv": "59b8d10459acf3065c11033d59f9dd83711dfa571329efe9d96255d50d22f790"
+  },
+  "media_content_decoded_or_hashed": false,
+  "normalized_source_group_rows": {
+    "train": 260,
+    "val": 84
+  },
+  "output_canonical_source_groups": {
+    "train": 4998,
+    "val": 1000
+  },
+  "output_canonical_source_overlap": 0,
+  "output_category_counts": {
+    "train": {
+      "audio_modified": 1250,
+      "both_modified": 1250,
+      "real": 1248,
+      "visual_modified": 1250
+    },
+    "val": {
+      "audio_modified": 250,
+      "both_modified": 250,
+      "real": 250,
+      "visual_modified": 250
+    }
+  },
+  "output_rows": {
+    "train": 4998,
+    "val": 1000
+  },
+  "output_sha256": {
+    "exclusions.csv": "ad728ae97da54e7304a42df6bc4395bbdc5f82910d976aeba0b743e996495bdc",
+    "train.csv": "4e0bb934f6373a2e40343e163c16fd8b25d893fd21c14cf14607aa06f076dd71",
+    "val.csv": "cef790ff36183319c49a98d8b85e84b0b7e8c31da8f6ae20c62508ed503fef46"
+  },
+  "selection": "metadata source identity only; no model predictions or evaluation outcomes",
+  "source_identity_precedence": "recorded source_group, falling back to original then file; provided original must agree under the same rules; only output source_group is rewritten",
+  "subject_identity_separation_asserted": false,
+  "validation_rows_preserved": true,
+  "version": "local-subset-v1"
+}

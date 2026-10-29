@@ -15,12 +15,9 @@ raw-video preparation, frozen prediction and concise offline reports. Run it
 through `python -m seepat.workflow`; use `python -m seepat.progress` for tracking
 and verification. It requires the sibling `docs/inference/` companions and a
 reviewed local freeze/input inventory. New reports and terminal summaries use a
-plain-language authentic (real)/manipulated (fake) paragraph, followed by separate
+plain-language authentic (real)/manipulated (fake) paragraph, followed by separate 
 technical details. Existing reports stay unchanged; old execution profiles must
-not be repinned or rerun after a source update. See the
-[completed four-video local check](../docs/inference/CLI_ACCEPTANCE_RESULTS.md):
-12/12 stages verified. Broader human review and detection quality remain open;
-this technical check is not an accuracy benchmark.
+not be repinned or rerun after a source update.
 Deepfake-Eval is locked. The preparation freeze does not enable execution.
 
 Phase-5 training and local return installation are complete; see

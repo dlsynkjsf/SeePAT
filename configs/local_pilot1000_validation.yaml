@@ -1,0 +1,14 @@
+# Development pilot; run from SeePAT-feat-improvement. Counts are before eligibility filtering.
+# Nested Train selection and a shared internal Validation subset; not a historical reproduction.
+report: outputs/local_pilot1000_v1/workflow_validation_summary.json
+decisions:
+- name: local_pilot1000-fusion-validation
+  validation_manifest: outputs/local_pilot1000_v1/calibration/events_val_calibrated.csv
+  source_manifest: data/manifests/local_pilots_v1/val200.csv
+  checkpoint: outputs/local_pilot1000_v1/training/fusion/checkpoint_best.pt
+  output_dir: outputs/local_pilot1000_v1/decisions/fusion
+  project_root: .
+  device: cuda
+  batch_size: 1
+  workers: 2
+  pin_memory: true

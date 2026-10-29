@@ -1,0 +1,82 @@
+# Opt-in optimized execution. Original Phase-5 profiles remain unchanged.
+# Requires the original frozen data, initialization checkpoint and matching resumed readiness.
+# workers=2 is a starting point, not a measured hardware optimum.
+report: outputs/workflow_fusion_phase5_optimized_readiness_resume_summary.json
+model_training:
+- name: phase5-optimized-readiness-control
+  model: swin3d_b_vild_fusion
+  train_manifest: outputs/phase5_context_inputs_v1/control_train.csv
+  validation_manifest: outputs/phase5_context_inputs_v1/control_val.csv
+  initialize_from: outputs/training/fusion_phase3_v1/experiments/video_max/checkpoint_best.pt
+  output_dir: outputs/training/fusion_phase5_optimized_v1/readiness/control
+  project_root: .
+  device: cuda
+  pretrained: true
+  input_profile: &id001
+    version: matched-clips-v1
+    summary_sha256: b30d129ea7ea4cc602cbf726f160c2d3a78803d04a8078584faae54fe218e55c
+    initial_checkpoint_sha256: 6bee2da4ab800638f14b0b28d1d5dce846015636e5489c240aa75b28f224c225
+  options:
+    epochs: 2
+    batch_size: 1
+    workers: 2
+    learning_rate: 0.0001
+    weight_decay: 0.01
+    gradient_accumulation_steps: 4
+    sequence_length: 16
+    image_size: 224
+    seed: 20260928
+    amp: false
+    freeze_backbone: true
+    unfreeze_final_backbone_stages: false
+    backbone_learning_rate: null
+    supervision: video_max
+    class_weighting: balanced_global
+    positive_class_weight_ratio: null
+    loss_function: cross_entropy
+    focal_gamma: 2
+    selection_metric: validation_video_balanced_accuracy
+    early_stopping_patience: 3
+    max_train_batches: 16
+    max_validation_batches: 4
+  runtime:
+    feature_cache_dir: .cache/frozen_encoders_v1
+    clip_cache_dir: null
+    persistent_train_workers: true
+- name: phase5-optimized-readiness-candidate
+  model: swin3d_b_vild_fusion
+  train_manifest: outputs/phase5_context_inputs_v1/candidate_train.csv
+  validation_manifest: outputs/phase5_context_inputs_v1/candidate_val.csv
+  initialize_from: outputs/training/fusion_phase3_v1/experiments/video_max/checkpoint_best.pt
+  output_dir: outputs/training/fusion_phase5_optimized_v1/readiness/candidate
+  project_root: .
+  device: cuda
+  pretrained: true
+  input_profile: *id001
+  options:
+    epochs: 2
+    batch_size: 1
+    workers: 2
+    learning_rate: 0.0001
+    weight_decay: 0.01
+    gradient_accumulation_steps: 4
+    sequence_length: 16
+    image_size: 224
+    seed: 20260928
+    amp: false
+    freeze_backbone: true
+    unfreeze_final_backbone_stages: false
+    backbone_learning_rate: null
+    supervision: video_max
+    class_weighting: balanced_global
+    positive_class_weight_ratio: null
+    loss_function: cross_entropy
+    focal_gamma: 2
+    selection_metric: validation_video_balanced_accuracy
+    early_stopping_patience: 3
+    max_train_batches: 16
+    max_validation_batches: 4
+  runtime:
+    feature_cache_dir: .cache/frozen_encoders_v1
+    clip_cache_dir: null
+    persistent_train_workers: true

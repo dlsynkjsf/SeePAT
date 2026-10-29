@@ -222,7 +222,7 @@ class HybridFusionEventClassifier(nn.Module):
             raise RuntimeError("Swin backbone returned an unexpected feature shape")
         return features
 
-    def _temporal_features(self, video: Tensor, frame_mask: Tensor | None) -> Tensor:
+    def _frame_features(self, video: Tensor) -> Tensor:
         batch_size, _, frames, height, width = video.shape
         frame_batch = video.permute(0, 2, 1, 3, 4).reshape(
             batch_size * frames,
@@ -238,10 +238,54 @@ class HybridFusionEventClassifier(nn.Module):
             frame_features = self.frame_backbone(normalized)
         if frame_features.ndim != 2:
             raise RuntimeError("Frame backbone returned an unexpected feature shape")
-        return self.temporal_encoder(
-            frame_features.reshape(batch_size, frames, -1),
-            frame_mask,
+        return frame_features.reshape(batch_size, frames, -1)
+
+    def _temporal_features(self, video: Tensor, frame_mask: Tensor | None) -> Tensor:
+        return self.temporal_encoder(self._frame_features(video), frame_mask)
+
+    def extract_frozen_features(self, video: Tensor) -> tuple[Tensor, Tensor]:
+        """Export only encoder outputs, before every trainable layer."""
+        if (not self.freeze_backbone or self.unfreeze_final_backbone_stages
+                or any(p.requires_grad for branch in (self.backbone, self.frame_backbone)
+                       for p in branch.parameters())
+                or self.backbone.training or self.frame_backbone.training):
+            raise ValueError("Feature caching requires fully frozen evaluation-mode encoders")
+        with torch.no_grad():
+            return self._swin_features(video), self._frame_features(video)
+
+    def forward_from_encoder_features(
+        self,
+        swin_features: Tensor,
+        frame_features: Tensor,
+        frame_mask: Tensor | None = None,
+        features: Tensor | None = None,
+        feature_mask: Tensor | None = None,
+    ) -> Tensor:
+        """Keep the trainable path and its dropout order identical to RGB forward."""
+        if swin_features.ndim != 2 or frame_features.ndim != 3:
+            raise ValueError("Cached features require B x S and B x T x F shapes")
+        if swin_features.shape[0] != frame_features.shape[0]:
+            raise ValueError("Cached encoder batch sizes differ")
+        if (not self.freeze_backbone or self.unfreeze_final_backbone_stages
+                or any(p.requires_grad for branch in (self.backbone, self.frame_backbone)
+                       for p in branch.parameters())
+                or self.backbone.training or self.frame_backbone.training):
+            raise ValueError("Cached forward requires fully frozen encoders")
+        tokens = {}
+        evidence_token = None
+        if self.uses_evidence_features:
+            if features is None or feature_mask is None:
+                raise ValueError("Fusion requires explicit evidence features and per-feature masks")
+            if features.shape[0] != swin_features.shape[0]:
+                raise ValueError("Evidence and encoder batch sizes must match")
+            evidence_token = self._evidence_embedding(features, feature_mask)
+        tokens["swin"] = self.swin_projection(swin_features)
+        tokens["temporal"] = self.temporal_projection(
+            self.temporal_encoder(frame_features, frame_mask)
         )
+        if evidence_token is not None:
+            tokens["evidence"] = evidence_token
+        return self.classifier(self.fusion(torch.stack(list(tokens.values()), dim=1)))
 
     def _evidence_embedding(self, features: Tensor, feature_mask: Tensor) -> Tensor:
         if features.ndim != 2 or feature_mask.shape != features.shape:

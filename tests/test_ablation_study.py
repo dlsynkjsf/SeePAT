@@ -155,6 +155,31 @@ ablation_study:
         assert ready.pretrained == (model != "tempcnn_gray16")
 
 
+def test_study_worker_tuning_preserves_fold_recipe_and_loads_from_config(tmp_path):
+    from seepat.training.study import _recipe, _study_settings
+
+    job = study_fixture(tmp_path)
+    tuned = replace(job, workers=2)
+    tuned.validate()
+    assert _recipe(tuned) == _recipe(job)
+    assert _study_settings(tuned) == _study_settings(job)
+    fold = {"fold": 1, "manifests": {"train": "train.csv", "val": "val.csv"}}
+    assert model_job(tuned, fold, "efficientnet_v2_s_only", readiness=False).options["workers"] == 2
+    config = tmp_path / "workers.yaml"
+    config.write_text(f'''report: {tmp_path.as_posix()}/report.json
+ablation_study:
+  name: paper
+  train_manifest: {job.train_manifest.as_posix()}
+  validation_manifest: {job.validation_manifest.as_posix()}
+  output_dir: {job.output_dir.as_posix()}
+  workers: 2
+''')
+    assert load_workflow_settings(config).study_job.workers == 2
+    for invalid in (-1, 1.5, True):
+        with pytest.raises(ValueError, match="workers"):
+            replace(job, workers=invalid).validate()
+
+
 def geometry_rows():
     return [{"event_id": f"event-{i}", "video_id": f"video-{i}", "class_id": str(i % 2),
              "manipulation_modality": "real" if i % 2 == 0 else "both_modified",

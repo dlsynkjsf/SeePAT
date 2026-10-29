@@ -141,6 +141,20 @@ def check_readiness(job: ModelTrainingJob) -> dict[str, object]:
             expected.pop(key)
         if actual != expected:
             raise ValueError("Readiness settings differ from the requested experiment")
+        if job.runtime is not None:
+            from seepat.training.runtime import load_runtime_options
+
+            expected_runtime = load_runtime_options(job.runtime, job.project_root).record()
+            recorded_runtime = run.get('runtime', {})
+            if any(recorded_runtime.get(key) != value for key, value in expected_runtime.items()):
+                raise ValueError("Readiness execution controls differ from the requested experiment")
+            if expected_runtime['feature_cache_dir'] is not None:
+                from seepat.training.feature_cache import FEATURE_CACHE_VERSION
+
+                cached = recorded_runtime.get('feature_cache', {})
+                if (cached.get('version') != FEATURE_CACHE_VERSION
+                        or cached.get('hits', 0) + cached.get('built', 0) < 1):
+                    raise ValueError("Readiness did not exercise the requested encoder cache")
         ready_job = replace(job, output_dir=directory, options=asdict(options), readiness_dir=None)
         if not _model_training_configuration_matches(ready_job, run):
             raise ValueError("Readiness input hashes, calibration, model or settings are stale")

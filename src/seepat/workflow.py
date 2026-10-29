@@ -54,6 +54,7 @@ class ModelTrainingJob:
     readiness_dir: Path | None = None
     initialize_from: Path | None = None
     input_profile: dict[str, str] | None = None
+    runtime: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -188,6 +189,8 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
                 ),
                 input_profile=(dict(_require_mapping(training["input_profile"], "Matched input profile"))
                                if training.get("input_profile") is not None else None),
+                runtime=(dict(_require_mapping(training['runtime'], 'Training runtime'))
+                         if training.get('runtime') is not None else None),
             )
         except KeyError as error:
             raise ValueError(
@@ -308,6 +311,8 @@ def load_workflow_settings(path: Path) -> WorkflowSettings:
             source_manifest=Path(item["source_manifest"]) if item.get("source_manifest") else None,
             project_root=Path(item.get("project_root", ".")), device=str(item.get("device", "auto")),
             batch_size=int(item.get("batch_size", 1)),
+            workers=item.get('workers', 0),
+            pin_memory=item.get('pin_memory', False),
             threshold_artifact=(
                 Path(item["threshold_artifact"])
                 if item.get("threshold_artifact")
@@ -577,6 +582,15 @@ def _model_training_options(job: ModelTrainingJob):
 
     options = TrainingOptions(**job.options)
     options.validate()
+    from seepat.training.runtime import load_runtime_options
+
+    runtime = load_runtime_options(job.runtime, job.project_root)
+    if runtime.feature_cache_dir is not None and (
+        job.model not in {'swin3d_b_vild_fusion', 'swin3d_b_visual_fusion'}
+        or options.amp or not options.freeze_backbone or options.unfreeze_final_backbone_stages
+        or options.batch_size != 1
+    ):
+        raise ValueError('Feature caching requires frozen FP32 hybrid fusion with batch size one')
     if options.supervision == VIDEO_MAX and job.model != FUSION_MODEL:
         raise ValueError("Production video_max supervision is supported only by full fusion")
     if job.input_profile is not None:
@@ -706,6 +720,7 @@ def _run_model_training(
     resume_from: Path | None,
     progress: ProgressCallback | None = None,
 ) -> dict[str, object]:
+    from seepat.training.runtime import load_runtime_options
     from seepat.training.train import train_from_manifests
 
     return train_from_manifests(
@@ -721,6 +736,8 @@ def _run_model_training(
         initialize_from=job.initialize_from,
         progress=progress,
         **({"input_profile": job.input_profile} if job.input_profile is not None else {}),
+        **({'runtime': load_runtime_options(job.runtime, job.project_root)}
+           if job.runtime is not None else {}),
     )
 
 

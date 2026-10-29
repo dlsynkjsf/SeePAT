@@ -78,13 +78,20 @@ def test_help_and_terminal_watcher_never_start_workers(tmp_path, monkeypatch, ca
     assert 'complete' in capsys.readouterr().out.lower()
 
 
-def test_profile_source_membership_is_frozen_and_has_no_old_protocol_mutation():
+def test_historical_profile_is_unchanged_and_refuses_optimized_sources():
     config = Path(__file__).parents[1] / 'configs/auxiliary_visual_pilot_v1.json'
     profile = runtime.read_json(config)
     pilot.validate_protocol(profile)
     source = Path(__file__).parents[1]
-    for relative, digest in profile['code_bindings'].items():
-        assert sha256((source / relative).read_bytes().replace(b'\r\n', b'\n')).hexdigest() == digest
+    # Optimization changes cannot silently authorize replaying a sealed old
+    # study. Keep the actual protocol unchanged and exercise its refusal.
+    assert sha256(config.read_bytes().replace(b'\r\n', b'\n')).hexdigest() == (
+        '112005b88a6a725f302f60addf73583266f1d0254cca1a05ad673c03b9ceb4c8'
+    )
+    assert any(sha256((source / relative).read_bytes().replace(b'\r\n', b'\n')).hexdigest()
+               != digest for relative, digest in profile['code_bindings'].items())
+    with pytest.raises(ValueError, match='Frozen auxiliary source'):
+        pilot.load_protocol(source, config)
 
 
 @pytest.mark.parametrize('extra_false_alarm,expected_gate', [(False, 'review_larger_design_only'),

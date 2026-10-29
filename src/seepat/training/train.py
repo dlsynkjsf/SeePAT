@@ -30,6 +30,7 @@ from seepat.training.metrics import (
     binary_classification_metrics,
     choose_balanced_accuracy_threshold,
 )
+from seepat.training.runtime import TrainingRuntimeOptions
 from seepat.training.video_objective import (
     VIDEO_MAX,
     VIDEO_SUPERVISION_CONTRACT,
@@ -393,7 +394,38 @@ def _forward_logits(
         )
     if not kwargs:
         return model(videos)
+    if 'frozen_swin_features' in batch:
+        forward_cached = getattr(model, 'forward_from_encoder_features', None)
+        if not callable(forward_cached):
+            raise TypeError("Model does not support cached encoder inputs")
+        return forward_cached(
+            batch['frozen_swin_features'].to(device=device, non_blocking=True),
+            batch['frozen_frame_features'].to(device=device, non_blocking=True),
+            **kwargs,
+        )
     return model(videos, **kwargs)
+
+
+def _epoch_indices(dataset, batch_size, seed, balanced_limit=None, batch_limit=None):
+    """Reproduce the existing event loader's order without loading any pixels."""
+    reference = _loader(dataset, batch_size, 0, torch.device('cpu'), True,
+                        seed, balanced_limit=balanced_limit)
+    # DataLoader consumes one base-seed draw before RandomSampler sees the
+    # generator, even with zero workers. Keep that exact old permutation.
+    torch.empty((), dtype=torch.int64).random_(generator=reference.generator)
+    indices = list(reference.sampler)
+    if isinstance(reference.dataset, Subset):
+        indices = [reference.dataset.indices[index] for index in indices]
+    return indices if batch_limit is None else indices[:batch_limit * batch_size]
+
+
+def _planned_loader(dataset, indices, batch_size, workers, device, seed):
+    """Bound prefetch as well as consumption to the prepared event plan."""
+    return DataLoader(
+        Subset(dataset, list(indices)), batch_size=batch_size, shuffle=False,
+        num_workers=workers, pin_memory=device.type == 'cuda',
+        persistent_workers=workers > 0, generator=torch.Generator().manual_seed(seed),
+    )
 
 
 def _evaluate(
@@ -642,8 +674,16 @@ def train_model(
     progress: ProgressCallback | None = None,
     *,
     video_objective: VideoObjective | None = None,
+    runtime: TrainingRuntimeOptions | None = None,
 ) -> dict[str, object]:
     options.validate()
+    runtime = runtime or TrainingRuntimeOptions()
+    runtime.validate()
+    if runtime.feature_cache_dir is not None and (
+        options.amp or not options.freeze_backbone or options.unfreeze_final_backbone_stages
+        or video_objective is not None or options.batch_size != 1
+    ):
+        raise ValueError("Feature caching requires frozen FP32 base-fusion training with batch size one")
     if video_objective is not None and options.supervision != VIDEO_MAX:
         raise ValueError("A video objective requires complete-video supervision")
     supervision_contract = video_objective.contract if video_objective else VIDEO_SUPERVISION_CONTRACT
@@ -828,6 +868,7 @@ def train_model(
         "resumed_from": resume_from.as_posix() if resume_from else None,
         "resume_contract": resume_contract,
         "options": asdict(options),
+        "runtime": runtime.record(),
         "parameters": parameter_counts(model),
         "optimizer_steps": 0,
         "skipped_optimizer_steps": 0,
@@ -866,7 +907,54 @@ def train_model(
     if train_bags is not None:
         print("Video-aware training: one weighted loss per complete video; event scores are not localization.")
 
+    reusable_train_loader = None
+    train_loader = None
     try:
+        cache_plans = None
+        if runtime.feature_cache_dir is not None:
+            from seepat.training.feature_cache import prepare_feature_datasets
+
+            if limited_run:
+                if train_bags is not None:
+                    train_indices = {
+                        index for epoch in range(start_epoch, options.epochs + 1)
+                        for bag in select_video_bags(train_bags, options.seed + epoch, True,
+                                                     options.max_train_batches)
+                        for index in bag.indices
+                    }
+                    val_indices = {
+                        index for bag in select_video_bags(validation_bags, options.seed, False,
+                                                           options.max_validation_batches)
+                        for index in bag.indices
+                    }
+                else:
+                    balanced_train = (train_batches_per_epoch * options.batch_size
+                                      if options.class_weighting == 'balanced_global' else None)
+                    train_indices = {
+                        index for epoch in range(start_epoch, options.epochs + 1)
+                        for index in _epoch_indices(train_dataset, options.batch_size,
+                                                    options.seed + epoch, balanced_train,
+                                                    train_batches_per_epoch)
+                    }
+                    reference_val = _loader(
+                        validation_dataset, options.batch_size, 0, device, False, options.seed,
+                        balanced_limit=(validation_batches_per_epoch * options.batch_size
+                                        if options.class_weighting == 'balanced_global' else None),
+                        require_video_classes=(
+                            options.selection_metric == VIDEO_BALANCED_ACCURACY_SELECTION
+                        ),
+                    )
+                    val_indices = list(reference_val.sampler)
+                    if isinstance(reference_val.dataset, Subset):
+                        val_indices = [reference_val.dataset.indices[index] for index in val_indices]
+                    val_indices = val_indices[:validation_batches_per_epoch * options.batch_size]
+                cache_plans = (train_indices, val_indices)
+            (train_dataset, validation_dataset), cache_report = prepare_feature_datasets(
+                model, (train_dataset, validation_dataset), runtime.feature_cache_dir, device, progress,
+                index_plans=cache_plans,
+            )
+            run_record['runtime']['feature_cache'] = cache_report
+            atomic_write_json(output_dir / 'run.json', run_record)
         validation_plan = (
             select_video_bags(validation_bags, options.seed, False, options.max_validation_batches)
             if validation_bags is not None else None
@@ -887,23 +975,59 @@ def train_model(
                 and options.selection_metric == VIDEO_BALANCED_ACCURACY_SELECTION
             ),
         )
+        if cache_plans is not None and validation_plan is None:
+            validation_loader = _planned_loader(
+                validation_dataset, cache_plans[1], options.batch_size, options.workers,
+                device, options.seed,
+            )
+        if runtime.persistent_train_workers:
+            from seepat.training.loading import ReusableTrainingLoader
+
+            reusable_train_loader = ReusableTrainingLoader(
+                train_dataset, options.batch_size, options.workers, device,
+            )
         for epoch in range(start_epoch, options.epochs + 1):
             train_plan = (
                 select_video_bags(train_bags, options.seed + epoch, True, options.max_train_batches)
                 if train_bags is not None else None
             )
-            train_loader = video_loader(
-                train_dataset, train_plan, options.workers, device, options.seed + epoch,
-            ) if train_plan is not None else _loader(
-                train_dataset,
-                options.batch_size,
-                options.workers,
-                device,
-                shuffle=True,
-                seed=options.seed + epoch,
-                balanced_limit=(train_batches_per_epoch * options.batch_size
-                                if limited_run and options.class_weighting == "balanced_global" else None),
-            )
+            if reusable_train_loader is not None:
+                indices = (
+                    [index for bag in train_plan for index in bag.indices]
+                    if train_plan is not None else _epoch_indices(
+                        train_dataset, options.batch_size, options.seed + epoch,
+                        balanced_limit=(train_batches_per_epoch * options.batch_size
+                                        if limited_run and options.class_weighting == 'balanced_global'
+                                        else None),
+                        batch_limit=train_batches_per_epoch,
+                    )
+                )
+                train_loader = reusable_train_loader.for_epoch(indices, options.seed + epoch)
+            else:
+                train_loader = video_loader(
+                    train_dataset, train_plan, options.workers, device, options.seed + epoch,
+                ) if train_plan is not None else _loader(
+                    train_dataset,
+                    options.batch_size,
+                    options.workers,
+                    device,
+                    shuffle=True,
+                    seed=options.seed + epoch,
+                    balanced_limit=(train_batches_per_epoch * options.batch_size
+                                    if limited_run and options.class_weighting == "balanced_global"
+                                    else None),
+                )
+                if cache_plans is not None and train_plan is None:
+                    indices = _epoch_indices(
+                        train_dataset, options.batch_size, options.seed + epoch,
+                        balanced_limit=(train_batches_per_epoch * options.batch_size
+                                        if options.class_weighting == 'balanced_global' else None),
+                        batch_limit=train_batches_per_epoch,
+                    )
+                    train_loader = _planned_loader(
+                        train_dataset, indices, options.batch_size, options.workers,
+                        device, options.seed + epoch,
+                    )
             model.train()
             if options.freeze_backbone and hasattr(model, "backbone"):
                 model.backbone.eval()
@@ -930,6 +1054,10 @@ def train_model(
                         "frame_mask_shape": list(batch["frame_mask"].shape),
                         "evidence_shape": list(batch["evidence_features"].shape),
                         "evidence_mask": batch["evidence_feature_mask"].tolist(),
+                        **({'input_representation': 'frozen_encoder_features',
+                            'swin_shape': list(batch['frozen_swin_features'].shape),
+                            'frame_features_shape': list(batch['frozen_frame_features'].shape)}
+                           if 'frozen_swin_features' in batch else {}),
                     }
                 updates = video_train.pop("optimizer_steps")
                 if updates != global_step - epoch_start_step:
@@ -950,6 +1078,10 @@ def train_model(
                         "frame_mask_shape": list(batch["frame_mask"].shape),
                         "evidence_shape": list(batch["evidence_features"].shape),
                         "evidence_mask": batch["evidence_feature_mask"].tolist(),
+                        **({'input_representation': 'frozen_encoder_features',
+                            'swin_shape': list(batch['frozen_swin_features'].shape),
+                            'frame_features_shape': list(batch['frozen_frame_features'].shape)}
+                           if 'frozen_swin_features' in batch else {}),
                     }
                 videos = batch["video"].to(device, non_blocking=True)
                 labels = batch["label"].to(device, non_blocking=True)
@@ -1131,6 +1263,10 @@ def train_model(
         )
         atomic_write_json(output_dir / "run.json", run_record)
         raise
+    finally:
+        train_loader = None
+        if reusable_train_loader is not None:
+            reusable_train_loader.close()
 
     elapsed_seconds = perf_counter() - started
     processed_events = processed_train_events + processed_validation_events
@@ -1246,8 +1382,13 @@ def train_from_manifests(
     initialize_from: Path | None = None,
     progress: ProgressCallback | None = None,
     input_profile: dict | None = None,
+    runtime: TrainingRuntimeOptions | None = None,
 ) -> dict[str, object]:
     options.validate()
+    runtime = runtime or TrainingRuntimeOptions()
+    runtime.validate()
+    if runtime.feature_cache_dir is not None and model_name not in {FUSION_MODEL, VISUAL_FUSION_MODEL}:
+        raise ValueError("Frozen feature caching is supported only by hybrid fusion models")
     if options.supervision == VIDEO_MAX and model_name != FUSION_MODEL:
         raise ValueError("Production video_max supervision is supported only by full fusion")
     if input_profile is not None and (model_name != FUSION_MODEL or options.supervision != VIDEO_MAX
@@ -1264,6 +1405,7 @@ def train_from_manifests(
         image_size=options.image_size,
         require_calibration=model_name == FUSION_MODEL,
         input_profile=input_profile,
+        **({'clip_cache_dir': runtime.clip_cache_dir} if runtime.clip_cache_dir is not None else {}),
     )
     validation_dataset = input_dataset(
         manifest_path=validation_manifest,
@@ -1273,6 +1415,7 @@ def train_from_manifests(
         image_size=options.image_size,
         require_calibration=model_name == FUSION_MODEL,
         input_profile=input_profile,
+        **({'clip_cache_dir': runtime.clip_cache_dir} if runtime.clip_cache_dir is not None else {}),
     )
     if train_dataset.calibration_contract != validation_dataset.calibration_contract:
         raise ValueError("Fusion Train and Validation must share the same frozen calibration")
@@ -1331,6 +1474,7 @@ def train_from_manifests(
         resume_contract=resume_contract,
         resume_from=resume_from,
         progress=progress,
+        runtime=runtime,
     )
 
 
@@ -1347,6 +1491,9 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--workers", type=int, default=0)
+    parser.add_argument("--clip-cache-dir", type=Path)
+    parser.add_argument("--feature-cache-dir", type=Path)
+    parser.add_argument("--persistent-train-workers", action='store_true')
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--weight-decay", type=float, default=0.01)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
@@ -1436,6 +1583,8 @@ def main() -> None:
         model_name=args.model,
         resume_from=args.resume_from,
         initialize_from=args.initialize_from,
+        runtime=TrainingRuntimeOptions(args.clip_cache_dir, args.feature_cache_dir,
+                                       args.persistent_train_workers),
     )
     print(json.dumps(report, indent=2))
 

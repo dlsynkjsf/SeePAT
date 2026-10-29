@@ -132,11 +132,13 @@ def scored_video_bags(
     progress: ProgressCallback | None = None,
     phase: str = "score complete videos",
 ) -> Iterator[dict[str, Any]]:
-    """Retain only the current winning graph; never update inside a video bag."""
+    """Stream training graphs; transfer detached evaluation scores once per video."""
+    evaluating = not torch.is_grad_enabled()
     batches = iter(loader)
     for bag_index, bag in enumerate(bags):
         winner = None
         largest_margin = float("-inf")
+        evaluation_logits, evaluation_probabilities = [], []
         labels, probabilities = [], []
         first_batch = None
         for event_index in range(len(bag.indices)):
@@ -167,7 +169,15 @@ def scored_video_bags(
             ):
                 raise ValueError("Context batch fabricated event or numerical evidence")
             logits = forward(model, videos, batch, device)
-            if logits.shape != (1, 2) or not torch.isfinite(logits).all().item():
+            if logits.shape != (1, 2):
+                raise FloatingPointError("Video objective requires finite binary event logits")
+            if evaluating:
+                evaluation_logits.append(logits.detach())
+                evaluation_probabilities.append(F.softmax(logits.detach().float(), dim=1)[:, 1])
+                labels.extend(batch["label"].tolist())
+                del logits, videos, batch
+                continue
+            if not torch.isfinite(logits).all().item():
                 raise FloatingPointError("Video objective requires finite binary event logits")
             margin_tensor = (logits[0, 1] - logits[0, 0]).detach()
             if not torch.isfinite(margin_tensor).item():
@@ -178,6 +188,16 @@ def scored_video_bags(
             labels.extend(batch["label"].tolist())
             probabilities.extend(F.softmax(logits.detach().float(), dim=1)[:, 1].cpu().tolist())
             del logits, videos, batch
+        if evaluating:
+            stacked = torch.cat(evaluation_logits, dim=0)
+            if not torch.isfinite(stacked).all().item():
+                raise FloatingPointError("Video objective requires finite binary event logits")
+            margins = stacked[:, 1] - stacked[:, 0]
+            if not torch.isfinite(margins).all().item():
+                raise FloatingPointError("Video event logit margin is not finite")
+            # argmax retains the first event in manifest order when margins tie.
+            winner = stacked.index_select(0, margins.argmax().reshape(1))
+            probabilities = torch.cat(evaluation_probabilities, dim=0).cpu().tolist()
         yield {
             "logits": winner,
             "label": torch.tensor([bag.label], device=device),

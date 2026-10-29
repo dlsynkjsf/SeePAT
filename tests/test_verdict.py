@@ -273,3 +273,84 @@ def test_run_verdict_aggregates_maximum_event_probability(
     evaluation = json.loads((tmp_path / "out" / "evaluation.json").read_text())
     assert evaluation["manifest"]["sha256"]
     assert evaluation["checkpoint"]["sha256"]
+
+
+def test_inference_workers_preserve_event_order_probabilities_and_missing_evidence(tmp_path):
+    rows = [
+        _event_row(tmp_path, "val/fake.mp4", "fake-a", class_id="1", modality="both_modified"),
+        _event_row(tmp_path, "val/real.mp4", "real-a", class_id="0", modality="real"),
+        _event_row(tmp_path, "val/fake.mp4", "fake-b", class_id="0", modality="both_modified"),
+    ]
+    rows[1]["isolation_forest_anomaly_score"] = ""
+    rows[1]["isolation_forest_available"] = "False"
+    manifest = tmp_path / "events.csv"
+    atomic_write_csv(manifest, rows)
+    dataset = verdict_module.MouthEventDataset(
+        manifest, tmp_path, sequence_length=4, image_size=8,
+    )
+    model = _tiny_fusion_model().eval()
+    expected = verdict_module._score_events(model, dataset, torch.device("cpu"), 1)
+    actual = verdict_module._score_events(
+        model, dataset, torch.device("cpu"), 1, workers=1, pin_memory=True,
+    )
+    assert actual == expected
+    assert [record["event_id"] for record in actual] == [row["event_id"] for row in rows]
+    assert actual[1]["isolation_forest_anomaly_score_available"] is False
+    assert actual[1]["isolation_forest_anomaly_score"] == ""
+
+
+@pytest.mark.parametrize("device_name,pinned", [("cpu", False), ("cuda", True)])
+def test_inference_loader_pinning_only_applies_to_cuda(tmp_path, monkeypatch, device_name, pinned):
+    manifest = tmp_path / "events.csv"
+    atomic_write_csv(manifest, [
+        _event_row(tmp_path, "val/a.mp4", "a", class_id="0", modality="real"),
+    ])
+    dataset = verdict_module.MouthEventDataset(
+        manifest, tmp_path, sequence_length=4, image_size=8,
+    )
+    observed = []
+    real_loader = verdict_module.DataLoader
+
+    def capture_loader(dataset, **kwargs):
+        observed.append(kwargs.copy())
+        # Exercise option plumbing on CPU even when CUDA is unavailable.
+        return real_loader(dataset, **{**kwargs, "num_workers": 0, "pin_memory": False})
+
+    monkeypatch.setattr(verdict_module, "DataLoader", capture_loader)
+    monkeypatch.setattr(verdict_module, "_forward_batch", lambda *_: (torch.zeros(1, 2), [None]))
+    verdict_module._score_events(
+        nn.Identity(), dataset, torch.device(device_name), 1, workers=2, pin_memory=True,
+    )
+    assert observed == [{"batch_size": 1, "shuffle": False, "num_workers": 2, "pin_memory": pinned}]
+
+
+@pytest.mark.parametrize("kwargs", [{"workers": -1}, {"workers": True}, {"workers": 1.5}, {"pin_memory": "yes"}])
+def test_invalid_inference_loader_settings_fail_before_inputs(tmp_path, kwargs):
+    for function, output in (
+        (verdict_module.select_threshold, {"output_path": tmp_path / "threshold.json"}),
+        (verdict_module.run_verdict, {"output_dir": tmp_path / "verdict"}),
+    ):
+        with pytest.raises((TypeError, ValueError), match="workers|pin_memory"):
+            function(tmp_path / "missing.csv", tmp_path / "missing.pt", **output, **kwargs)
+    assert not (tmp_path / "threshold.json").exists()
+    assert not (tmp_path / "verdict").exists()
+
+
+@pytest.mark.parametrize("entry", ["verdict", "select", "threshold"])
+def test_inference_cli_passes_loader_settings(monkeypatch, entry):
+    calls = []
+
+    def record(*args, **kwargs):
+        calls.append(kwargs)
+        return {}
+
+    monkeypatch.setattr(verdict_module, "run_verdict", record)
+    monkeypatch.setattr(verdict_module, "select_threshold", record)
+    output_argument = "--output" if entry == "threshold" else "--output-dir"
+    arguments = ["command", "--manifest", "events.csv", "--checkpoint", "model.pt",
+                 output_argument, "output", "--workers", "2", "--pin-memory"]
+    if entry == "select":
+        arguments.append("--select-threshold")
+    monkeypatch.setattr("sys.argv", arguments)
+    (verdict_module.threshold_main if entry == "threshold" else verdict_module.main)()
+    assert calls[0]["workers"] == 2 and calls[0]["pin_memory"] is True

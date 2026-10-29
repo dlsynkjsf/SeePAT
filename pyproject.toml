@@ -21,6 +21,8 @@ dev = [
 ]
 preprocess = [
   "faster-whisper>=1.1,<2",
+  # faster-whisper 1.2.1 passes metadata_errors, removed by PyAV 19.
+  "av>=11,<19",
   # Last Windows release with the FaceMesh Solutions API used by this project.
   "mediapipe==0.10.21",
   "numpy>=1.26,<3",

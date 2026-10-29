@@ -1,0 +1,36 @@
+# Development pilot; run from SeePAT-feat-improvement. Counts are before eligibility filtering.
+# Nested Train selection and a shared internal Validation subset; not a historical reproduction.
+report: outputs/local_pilot1000_v1/workflow_readiness_summary.json
+model_training:
+- name: local_pilot1000-fusion-readiness
+  model: swin3d_b_vild_fusion
+  train_manifest: outputs/local_pilot1000_v1/calibration/events_train_calibrated.csv
+  validation_manifest: outputs/local_pilot1000_v1/calibration/events_val_calibrated.csv
+  output_dir: outputs/local_pilot1000_v1/readiness/fusion
+  project_root: .
+  device: cuda
+  pretrained: true
+  options:
+    epochs: 1
+    batch_size: 1
+    workers: 2
+    learning_rate: 0.0001
+    weight_decay: 0.01
+    gradient_accumulation_steps: 4
+    sequence_length: 16
+    image_size: 224
+    seed: 20261030
+    amp: false
+    freeze_backbone: true
+    unfreeze_final_backbone_stages: false
+    class_weighting: balanced_global
+    loss_function: cross_entropy
+    supervision: video_max
+    selection_metric: validation_video_balanced_accuracy
+    early_stopping_patience: 3
+    max_train_batches: 16
+    max_validation_batches: 4
+  runtime:
+    feature_cache_dir: .cache/local_subset_v1/frozen_encoders
+    clip_cache_dir: null
+    persistent_train_workers: true

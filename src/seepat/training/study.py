@@ -33,6 +33,7 @@ class StudyJob:
     epochs: int = 10
     device: str = "cuda"
     project_root: Path = Path(".")
+    workers: int = 0
 
     def validate(self) -> None:
         if self.phase not in {"prepare", "audit", "readiness", "train", "evaluate", "calibration"}:
@@ -43,6 +44,8 @@ class StudyJob:
             raise ValueError("Study requires unique supported model names")
         if self.device not in {"cpu", "cuda", "auto"}:
             raise ValueError("Study device must be cpu, cuda or auto")
+        if isinstance(self.workers, bool) or not isinstance(self.workers, int) or self.workers < 0:
+            raise ValueError("Study workers must be a nonnegative integer")
         for source in (self.train_manifest, self.validation_manifest):
             if source.resolve().is_relative_to(self.output_dir.resolve()):
                 raise ValueError("Study output must be separate from its source manifests")
@@ -102,6 +105,14 @@ def _recipe(job: StudyJob) -> dict:
     return {"version": STUDY_VERSION, "folds": job.folds, "seed": job.seed,
             "train_manifest": job.train_manifest.as_posix(),
             "validation_manifest": job.validation_manifest.as_posix()}
+
+
+def _study_settings(job: StudyJob) -> dict:
+    # Worker count is runtime tuning. Preserve the scientific settings in saved
+    # completion records, including records produced before this option existed.
+    settings = asdict(job)
+    settings.pop("workers")
+    return json.loads(json.dumps(settings, default=str))
 
 
 def prepare_study(job: StudyJob, progress: ProgressCallback | None = None) -> dict:
@@ -208,7 +219,7 @@ def model_job(job: StudyJob, fold: dict, model: str, *, readiness: bool):
         project_root=job.project_root, device=job.device, pretrained=model != "tempcnn_gray16",
         readiness_dir=None if readiness else ready_dir,
         options={"epochs": job.readiness_epochs if readiness else job.epochs,
-                 "batch_size": 1, "workers": 0, "learning_rate": 1e-4, "weight_decay": .01,
+                 "batch_size": 1, "workers": job.workers, "learning_rate": 1e-4, "weight_decay": .01,
                  "gradient_accumulation_steps": 4, "sequence_length": 16, "image_size": 224,
                  "seed": job.seed, "amp": False, "freeze_backbone": model != "tempcnn_gray16",
                  "class_weighting": "balanced_global", "early_stopping_patience": 3,
@@ -272,7 +283,7 @@ def run_study_job(job: StudyJob, progress: ProgressCallback | None = None) -> di
                 files.append(job.output_dir / f"fold_{result['fold']}" / "calibration_comparison.json")
         atomic_write_json(job.output_dir / f"{job.phase}_complete.json", {
             "report_version": REPORT_VERSION,
-            "settings": json.loads(json.dumps(asdict(job), default=str)),
+            "settings": _study_settings(job),
             "study_sha256": file_sha256(job.output_dir / "study.json"),
             "artifacts": {p.as_posix(): file_sha256(p) for p in files},
         })
@@ -305,7 +316,7 @@ def study_phase_is_current(job: StudyJob) -> bool:
         required = report_paths(job.output_dir / f"{job.phase}_comparison")
         return (complete.get("report_version") == REPORT_VERSION
                 and all(path.as_posix() in complete["artifacts"] for path in required)
-                and complete["settings"] == json.loads(json.dumps(asdict(job), default=str))
+                and complete["settings"] == _study_settings(job)
                 and complete["study_sha256"] == file_sha256(job.output_dir / "study.json")
                 and all(file_sha256(Path(p)) == digest for p, digest in complete["artifacts"].items()))
     except (OSError, ValueError, KeyError, TypeError):

@@ -10,6 +10,7 @@ from seepat.artifacts import file_sha256, read_csv_rows
 from seepat.context_inputs import INPUT_VERSION, paired_indices
 from seepat.data.sampling import canonical_source_group
 from seepat.evidence import FUSION_EVIDENCE_FIELDS, evidence_coverage
+from seepat.training.clip_cache import read_clip_array
 from seepat.training.dataset import FEATURE_FIELDS, MouthEventDataset, video_class_id
 
 PROFILE_VERSION = "matched-clips-v1"
@@ -42,7 +43,8 @@ class MatchedClipDataset:
     """
 
     def __init__(self, manifest_path: Path, project_root: Path, dataset_split: str,
-                 profile: dict, sequence_length: int = 16, image_size: int = 224):
+                 profile: dict, sequence_length: int = 16, image_size: int = 224,
+                 clip_cache_dir: Path | None = None):
         if dataset_split not in {"train", "val"} or sequence_length != 16 or image_size < 1:
             raise ValueError("Matched inputs require Train/Validation, 16 slots and a positive size")
         self.profile = validate_profile(profile)
@@ -76,7 +78,8 @@ class MatchedClipDataset:
             originals[split] = path
         self.bilabials = MouthEventDataset(originals[dataset_split], self.root,
                                            dataset_split=dataset_split, sequence_length=16,
-                                           image_size=image_size, require_calibration=True)
+                                           image_size=image_size, require_calibration=True,
+                                           clip_cache_dir=clip_cache_dir)
         self.calibration_contract = self.bilabials.calibration_contract
         self.input_contract = {
             "version": PROFILE_VERSION, "profile": self.profile, "arm": self.arm,
@@ -87,6 +90,8 @@ class MatchedClipDataset:
             "context_evidence": "all values zero placeholders, all availability flags false",
         }
         self.image_size = image_size
+        self.sequence_length = sequence_length
+        self.clip_cache_dir = clip_cache_dir
         self.rows, self.contexts, self.base_indices = [], {}, {}
         original_by_video = defaultdict(list)
         for index, row in enumerate(self.bilabials.rows):
@@ -166,38 +171,23 @@ class MatchedClipDataset:
                 raise ValueError("Context clip hash mismatch")
         return dict(Counter(row["kind"] for row in self.rows))
 
-    def __getitem__(self, index):
-        import cv2
-        import numpy as np
+    def clip_source(self, index):
+        row = self.rows[index]
+        if row["kind"] == "bilabial":
+            return self.bilabials.clip_source(self.base_indices[row["event_id"]])
+        window = self.contexts[row["event_id"]]
+        return (inside(self.root, row["mouth_clip_path"]),
+                window["clip_sha256"], list(window["frame_mask"]))
+
+    def sample_metadata(self, index):
+        """Keep event targets and evidence outside derived pixel/feature caches."""
         import torch
 
         row = self.rows[index]
         if row["kind"] == "bilabial":
-            sample = self.bilabials[self.base_indices[row["event_id"]]]
+            sample = self.bilabials.sample_metadata(self.base_indices[row["event_id"]])
             return {**sample, "source_group": row["source_group"], "kind": "bilabial"}
-        window = self.contexts[row["event_id"]]
-        path = inside(self.root, row["mouth_clip_path"])
-        if file_sha256(path) != window["clip_sha256"]:
-            raise ValueError("Context clip hash mismatch")
-        capture = cv2.VideoCapture(str(path))
-        frames = []
-        try:
-            while True:
-                ok, frame = capture.read()
-                if not ok:
-                    break
-                frames.append(cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
-                                         (self.image_size, self.image_size)))
-        finally:
-            capture.release()
-        if len(frames) != 16:
-            raise ValueError("Context decoder must retain exactly 16 stored slots")
-        array = np.stack(frames)
-        array[~np.array(window["frame_mask"], dtype=bool)] = 0
         return {
-            "video": torch.from_numpy(np.ascontiguousarray(array)).permute(3, 0, 1, 2).float().div_(255),
-            "frame_mask": torch.tensor(window["frame_mask"], dtype=torch.bool),
-            "decoded_frame_count": len(frames),
             "features": torch.zeros(len(FEATURE_FIELDS)), "feature_mask": torch.zeros(len(FEATURE_FIELDS), dtype=torch.bool),
             "evidence_features": torch.zeros(len(FUSION_EVIDENCE_FIELDS)),
             "evidence_feature_mask": torch.zeros(len(FUSION_EVIDENCE_FIELDS), dtype=torch.bool),
@@ -206,13 +196,33 @@ class MatchedClipDataset:
             "manipulation_modality": row["manipulation_modality"], "phoneme": "", "kind": "context",
         }
 
+    def __getitem__(self, index):
+        import torch
+
+        row = self.rows[index]
+        if row["kind"] == "bilabial":
+            sample = self.bilabials[self.base_indices[row["event_id"]]]
+            return {**sample, "source_group": row["source_group"], "kind": "bilabial"}
+        path, expected_hash, frame_mask = self.clip_source(index)
+        array, frame_mask, decoded_count = read_clip_array(
+            path, 16, self.image_size, self.clip_cache_dir,
+            expected_sha256=expected_hash, context_frame_mask=frame_mask,
+        )
+        return {
+            "video": torch.from_numpy(array).permute(3, 0, 1, 2).float().div_(255),
+            "frame_mask": torch.tensor(frame_mask, dtype=torch.bool),
+            "decoded_frame_count": decoded_count,
+            **self.sample_metadata(index),
+        }
+
 
 def input_dataset(manifest_path, project_root, dataset_split, sequence_length=16, image_size=224,
-                  require_calibration=False, allow_empty=False, input_profile=None):
+                  require_calibration=False, allow_empty=False, input_profile=None,
+                  clip_cache_dir=None):
     if input_profile is not None:
         if not require_calibration or allow_empty:
             raise ValueError("Matched inputs require fusion calibration and a nonempty paired cohort")
         return MatchedClipDataset(manifest_path, project_root, dataset_split, input_profile,
-                                  sequence_length, image_size)
+                                  sequence_length, image_size, clip_cache_dir)
     return MouthEventDataset(manifest_path, project_root, dataset_split, sequence_length,
-                             image_size, require_calibration, allow_empty)
+                             image_size, require_calibration, allow_empty, clip_cache_dir)

@@ -1,0 +1,60 @@
+{
+  "cleaned_dir": "C:\\Users\\cjpin\\OneDrive\\Desktop\\Thesis\\SeePAT-feat-improvement\\data\\manifests\\local_subset_v1",
+  "dataset_root": "C:\\Users\\cjpin\\OneDrive\\Desktop\\Thesis\\Videos_Dataset\\SeePAT_dataset_5000_train_1000_val",
+  "full_validation_source_overlap": 0,
+  "input_sha256": {
+    "audit.json": "4bf1c125cc8ec66b693689d46327567482412dd5a5f5b012085b8fc73cb531eb",
+    "train.csv": "4e0bb934f6373a2e40343e163c16fd8b25d893fd21c14cf14607aa06f076dd71",
+    "val.csv": "cef790ff36183319c49a98d8b85e84b0b7e8c31da8f6ae20c62508ed503fef46"
+  },
+  "media_content_decoded_or_hashed": false,
+  "nested_train_sizes": [
+    500,
+    1000
+  ],
+  "order": "round-robin real/audio_modified/visual_modified/both_modified",
+  "outputs": {
+    "train1000.csv": {
+      "category_counts": {
+        "audio_modified": 250,
+        "both_modified": 250,
+        "real": 250,
+        "visual_modified": 250
+      },
+      "media_bytes": 626171633,
+      "rows": 1000,
+      "sha256": "4f829d4ab1a8c2b0efa54a002cef0eade1ec44f59cc5a22d8306592f28674b82",
+      "source_groups": 1000
+    },
+    "train500.csv": {
+      "category_counts": {
+        "audio_modified": 125,
+        "both_modified": 125,
+        "real": 125,
+        "visual_modified": 125
+      },
+      "media_bytes": 316748599,
+      "rows": 500,
+      "sha256": "e8f654c57ec3d8d7c4cc9c3e0999e2b49191476ee3d3b529785adc2bc366da40",
+      "source_groups": 500
+    },
+    "val200.csv": {
+      "category_counts": {
+        "audio_modified": 50,
+        "both_modified": 50,
+        "real": 50,
+        "visual_modified": 50
+      },
+      "media_bytes": 155220226,
+      "rows": 200,
+      "sha256": "09d501fe6b60a0eef72c0df4b01887aef17d25c74ddfb319ea4a20256fc27201",
+      "source_groups": 200
+    }
+  },
+  "ranking": "SHA-256 of JSON [seed,split,modify_type,source_group,file]; file breaks ties",
+  "seed": 20261030,
+  "selection": "category-stratified metadata only, before processing/eligibility; no outcomes",
+  "subject_identity_separation_asserted": false,
+  "validation_is_internal_development": true,
+  "version": "local-pilots-v1"
+}

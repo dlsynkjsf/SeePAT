@@ -1,0 +1,29 @@
+# Development pilot; run from SeePAT-feat-improvement. Counts are before eligibility filtering.
+# Nested Train selection and a shared internal Validation subset; not a historical reproduction.
+report: outputs/local_pilot1000_v1/workflow_prepare_summary.json
+jobs:
+- name: local_pilot1000-train
+  pipeline_config: configs/local_pilot1000_train.yaml
+  manifest_output_dir: data/training/local_pilot1000_v1/train
+- name: local_pilot1000-val
+  pipeline_config: configs/local_pilot_val200.yaml
+  manifest_output_dir: data/training/local_pilots_v1/val200
+trace_augmentation:
+- name: local_pilot1000-train-traces
+  manifest: data/training/local_pilot1000_v1/train/events_train.csv
+  extracted_root: ../Videos_Dataset/SeePAT_dataset_5000_train_1000_val/train
+  output_dir: outputs/local_pilot1000_v1/trace_augmentation/train
+- name: local_pilot1000-val-traces
+  manifest: data/training/local_pilots_v1/val200/events_val.csv
+  extracted_root: ../Videos_Dataset/SeePAT_dataset_5000_train_1000_val/val
+  output_dir: outputs/local_pilots_v1/trace_augmentation/val200
+numerical_calibration:
+  name: local_pilot1000-train-calibration
+  train_manifest: outputs/local_pilot1000_v1/trace_augmentation/train/events_augmented.csv
+  score_manifests:
+    train: outputs/local_pilot1000_v1/trace_augmentation/train/events_augmented.csv
+    val: outputs/local_pilots_v1/trace_augmentation/val200/events_augmented.csv
+  output_dir: outputs/local_pilot1000_v1/calibration
+  min_video_reference_frames: 16
+  isolation_trees: 100
+  random_seed: 20260908

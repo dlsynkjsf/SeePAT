@@ -9,6 +9,8 @@ from typing import Any
 from seepat.artifacts import read_csv_rows
 from seepat.evidence import calibrated_manifest_contract, evidence_feature_values
 from seepat.evidence import evidence_coverage as _evidence_coverage
+from seepat.training.clip_cache import read_clip_array
+from seepat.training.clip_cache import sequence_frame_indices as _sequence_frame_indices
 
 FEATURE_FIELDS = (
     "normalized_minimum_closure",
@@ -29,6 +31,11 @@ VIDEO_MODALITY_LABELS = {
 }
 
 
+def sequence_frame_indices(frame_count: int, sequence_length: int) -> tuple[list[int], list[bool]]:
+    """Retain the public dataset selection API used by existing experiments."""
+    return _sequence_frame_indices(frame_count, sequence_length)
+
+
 def video_class_id(manipulation_modality: str) -> int:
     try:
         return VIDEO_MODALITY_LABELS[manipulation_modality.strip()]
@@ -36,28 +43,6 @@ def video_class_id(manipulation_modality: str) -> int:
         raise ValueError(
             f"Unsupported manipulation modality: {manipulation_modality!r}"
         ) from error
-
-
-def sequence_frame_indices(frame_count: int, sequence_length: int) -> tuple[list[int], list[bool]]:
-    if frame_count < 1:
-        raise ValueError("frame_count must be at least 1")
-    if sequence_length < 1:
-        raise ValueError("sequence_length must be at least 1")
-
-    if frame_count >= sequence_length:
-        if sequence_length == 1:
-            return [frame_count // 2], [True]
-        indices = [
-            round(index * (frame_count - 1) / (sequence_length - 1))
-            for index in range(sequence_length)
-        ]
-        return indices, [True] * sequence_length
-
-    padding = sequence_length - frame_count
-    return (
-        list(range(frame_count)) + [frame_count - 1] * padding,
-        [True] * frame_count + [False] * padding,
-    )
 
 
 def numeric_feature_values(row: dict[str, str]) -> tuple[list[float], list[bool]]:
@@ -95,6 +80,7 @@ class MouthEventDataset:
         image_size: int = 224,
         require_calibration: bool = False,
         allow_empty: bool = False,
+        clip_cache_dir: Path | None = None,
     ) -> None:
         if sequence_length < 1:
             raise ValueError("sequence_length must be at least 1")
@@ -139,6 +125,7 @@ class MouthEventDataset:
         self.project_root = project_root
         self.sequence_length = sequence_length
         self.image_size = image_size
+        self.clip_cache_dir = clip_cache_dir
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -147,10 +134,17 @@ class MouthEventDataset:
         """Fraction of events with each biological-alignment evidence field."""
         return _evidence_coverage(self.rows)
 
-    def __getitem__(self, index: int) -> dict[str, Any]:
+    def clip_source(self, index: int) -> tuple[Path, None, None]:
+        """Locate source pixels without decoding or caching targets/evidence."""
+        relative_path = Path(self.rows[index]["mouth_clip_path"].replace("\\", "/"))
+        clip_path = (
+            relative_path if relative_path.is_absolute() else self.project_root / relative_path
+        )
+        return clip_path, None, None
+
+    def sample_metadata(self, index: int) -> dict[str, Any]:
+        """Return live manifest-derived sample fields independently of pixels."""
         try:
-            import cv2
-            import numpy as np
             import torch
         except ImportError as error:
             raise RuntimeError(
@@ -158,37 +152,10 @@ class MouthEventDataset:
             ) from error
 
         row = self.rows[index]
-        relative_path = Path(row["mouth_clip_path"].replace("\\", "/"))
-        clip_path = (
-            relative_path if relative_path.is_absolute() else self.project_root / relative_path
-        )
-        capture = cv2.VideoCapture(str(clip_path))
-        if not capture.isOpened():
-            raise RuntimeError(f"Could not open mouth clip: {clip_path}")
-
-        frames = []
-        try:
-            while True:
-                ok, frame = capture.read()
-                if not ok:
-                    break
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frames.append(cv2.resize(frame, (self.image_size, self.image_size)))
-        finally:
-            capture.release()
-        if not frames:
-            raise RuntimeError(f"Mouth clip contains no readable frames: {clip_path}")
-
-        indices, frame_mask = sequence_frame_indices(len(frames), self.sequence_length)
-        array = np.ascontiguousarray(np.stack([frames[position] for position in indices]))
-        video = torch.from_numpy(array).permute(3, 0, 1, 2).float().div_(255.0)
         feature_values, feature_mask = numeric_feature_values(row)
         evidence_values, evidence_mask = evidence_feature_values(row)
 
         return {
-            "video": video,
-            "frame_mask": torch.tensor(frame_mask, dtype=torch.bool),
-            "decoded_frame_count": len(frames),
             "features": torch.tensor(feature_values, dtype=torch.float32),
             "feature_mask": torch.tensor(feature_mask, dtype=torch.bool),
             "evidence_features": torch.tensor(evidence_values, dtype=torch.float32),
@@ -205,6 +172,21 @@ class MouthEventDataset:
             "phoneme": row["phoneme"],
         }
 
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        metadata = self.sample_metadata(index)
+        import torch
+
+        clip_path, _, _ = self.clip_source(index)
+        array, frame_mask, decoded_count = read_clip_array(
+            clip_path, self.sequence_length, self.image_size, self.clip_cache_dir,
+        )
+        return {
+            "video": torch.from_numpy(array).permute(3, 0, 1, 2).float().div_(255.0),
+            "frame_mask": torch.tensor(frame_mask, dtype=torch.bool),
+            "decoded_frame_count": decoded_count,
+            **metadata,
+        }
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m seepat.training.dataset")
@@ -213,6 +195,7 @@ def main() -> None:
     parser.add_argument("--split")
     parser.add_argument("--sequence-length", type=int, default=16)
     parser.add_argument("--image-size", type=int, default=224)
+    parser.add_argument("--clip-cache-dir", type=Path)
     args = parser.parse_args()
 
     dataset = MouthEventDataset(
@@ -221,6 +204,7 @@ def main() -> None:
         dataset_split=args.split,
         sequence_length=args.sequence_length,
         image_size=args.image_size,
+        clip_cache_dir=args.clip_cache_dir,
     )
     sample = dataset[0]
     report = {

@@ -131,12 +131,14 @@ def _forward_batch(
         kwargs["frame_mask"] = batch["frame_mask"].to(
             device=device,
             dtype=torch.bool,
+            non_blocking=True,
         )
     if bool(getattr(model, "uses_evidence_features", False)):
-        kwargs["features"] = batch["evidence_features"].to(device=device)
+        kwargs["features"] = batch["evidence_features"].to(device=device, non_blocking=True)
         kwargs["feature_mask"] = batch["evidence_feature_mask"].to(
             device=device,
             dtype=torch.bool,
+            non_blocking=True,
         )
     logits = model(videos, **kwargs) if kwargs else model(videos)
     if logits.shape != (videos.shape[0], 2) or not torch.isfinite(logits).all():
@@ -150,8 +152,18 @@ def _score_events(
     device: torch.device,
     batch_size: int,
     progress: ProgressCallback | None = None,
+    *,
+    workers: int = 0,
+    pin_memory: bool = False,
 ) -> list[dict[str, object]]:
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    _validate_loader_settings(batch_size, workers, pin_memory)
+    loader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=workers,
+        pin_memory=pin_memory and device.type == "cuda",
+    )
     rows_by_event = {row["event_id"]: row for row in dataset.rows}
     records: list[dict[str, object]] = []
     with torch.inference_mode():
@@ -192,6 +204,15 @@ def _score_events(
     if progress is not None:
         progress("score verdict events", len(loader), len(loader), "")
     return records
+
+
+def _validate_loader_settings(batch_size: int, workers: int, pin_memory: bool) -> None:
+    if batch_size < 1:
+        raise ValueError("batch_size must be positive")
+    if isinstance(workers, bool) or not isinstance(workers, int) or workers < 0:
+        raise ValueError("workers must be a nonnegative integer")
+    if not isinstance(pin_memory, bool):
+        raise TypeError("pin_memory must be a boolean")
 
 
 def _requested_video_ids(source_manifest: Path) -> list[str]:
@@ -378,9 +399,9 @@ def select_threshold(
     project_root: Path = Path("."), device_name: str = "auto", batch_size: int = 1,
     sequence_length: int | None = None, image_size: int | None = None,
     progress: ProgressCallback | None = None,
+    workers: int = 0, pin_memory: bool = False,
 ) -> dict[str, object]:
-    if batch_size < 1:
-        raise ValueError("batch_size must be positive")
+    _validate_loader_settings(batch_size, workers, pin_memory)
     contract, provenance = evaluation_inputs(
         manifest_path, checkpoint_path, split, dataset_source, sequence_length, image_size,
         project_root=project_root,
@@ -394,7 +415,9 @@ def select_threshold(
     if {video_class_id(row["manipulation_modality"]) for row in dataset.rows} != {0, 1}:
         raise ValueError("Threshold selection requires both classes in Validation")
     model, _ = load_evaluation_model(checkpoint_path, device)
-    records = _score_events(model, dataset, device, batch_size, progress)
+    records = _score_events(
+        model, dataset, device, batch_size, progress, workers=workers, pin_memory=pin_memory,
+    )
     _, labels, probabilities = aggregate_video_probabilities(
         [str(r["video_id"]) for r in records], [int(r["video_label"]) for r in records],
         [float(r["manipulated_probability"]) for r in records],
@@ -436,9 +459,10 @@ def run_verdict(
     validation_transfer: bool = False,
     progress: ProgressCallback | None = None,
     input_profile: dict | None = None,
+    workers: int = 0,
+    pin_memory: bool = False,
 ) -> dict[str, object]:
-    if batch_size < 1:
-        raise ValueError("batch_size must be positive")
+    _validate_loader_settings(batch_size, workers, pin_memory)
     if device_name == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     elif device_name == "cuda" and not torch.cuda.is_available():
@@ -485,7 +509,9 @@ def run_verdict(
             raise ValueError("Threshold prediction inventory does not match Validation events")
     elif len(dataset):
         model, _ = load_evaluation_model(checkpoint_path, device)
-        records = _score_events(model, dataset, device, batch_size, progress)
+        records = _score_events(
+            model, dataset, device, batch_size, progress, workers=workers, pin_memory=pin_memory,
+        )
 
     video_ids = [str(record["video_id"]) for record in records]
     video_labels = [int(record["video_label"]) for record in records]
@@ -651,6 +677,11 @@ def main() -> None:
     parser.add_argument("--project-root", type=Path, default=Path("."))
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--workers", type=int, default=0, help="Inference data-loading workers")
+    parser.add_argument(
+        "--pin-memory", action=argparse.BooleanOptionalAction, default=False,
+        help="Pin inference inputs for nonblocking CUDA transfers",
+    )
     parser.add_argument("--sequence-length", type=int)
     parser.add_argument("--image-size", type=int)
     args = parser.parse_args()
@@ -667,6 +698,7 @@ def main() -> None:
             args.manifest, args.checkpoint, args.output_dir / "threshold.json",
             split=args.split, dataset_source=args.dataset_source, project_root=args.project_root,
             device_name=args.device, batch_size=args.batch_size,
+            workers=args.workers, pin_memory=args.pin_memory,
             sequence_length=args.sequence_length, image_size=args.image_size,
         )
         print(json.dumps(result, indent=2))
@@ -682,6 +714,8 @@ def main() -> None:
         project_root=args.project_root,
         device_name=args.device,
         batch_size=args.batch_size,
+        workers=args.workers,
+        pin_memory=args.pin_memory,
         sequence_length=args.sequence_length,
         image_size=args.image_size,
         calibration_summary=args.calibration_summary,
@@ -709,6 +743,11 @@ def threshold_main() -> None:
     parser.add_argument("--project-root", type=Path, default=Path("."))
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--batch-size", type=int, default=1)
+    parser.add_argument("--workers", type=int, default=0, help="Inference data-loading workers")
+    parser.add_argument(
+        "--pin-memory", action=argparse.BooleanOptionalAction, default=False,
+        help="Pin inference inputs for nonblocking CUDA transfers",
+    )
     parser.add_argument("--sequence-length", type=int)
     parser.add_argument("--image-size", type=int)
     args = parser.parse_args()
@@ -717,6 +756,7 @@ def threshold_main() -> None:
         args.manifest, args.checkpoint, args.output,
         split=args.split, dataset_source=args.dataset_source, project_root=args.project_root,
         device_name=args.device, batch_size=args.batch_size,
+        workers=args.workers, pin_memory=args.pin_memory,
         sequence_length=args.sequence_length, image_size=args.image_size,
     )
     print(json.dumps(artifact, indent=2))
