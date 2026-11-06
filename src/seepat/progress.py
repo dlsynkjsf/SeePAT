@@ -371,9 +371,13 @@ def main() -> None:
             formatted = format_progress(progress)
         if args.watch_seconds is None:
             print(json.dumps(progress, indent=2))
+            if args.verify and not finished:
+                raise SystemExit(1)
             return
         print(formatted, flush=True)
         if finished:
+            if progress.get("status") in {"failed", "interrupted"}:
+                raise SystemExit(1)
             return
         try:
             sleep(args.watch_seconds)

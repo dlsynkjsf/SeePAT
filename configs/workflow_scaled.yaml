@@ -33,7 +33,7 @@
 #     --output-dir data/extracted/avpp/val-subset1000 \
 #     --report outputs/extract_val_subset1000.json
 #
-# Keep dataset.extracted_root in configs/train_scaled.yaml / val_scaled.yaml in
+# Keep dataset.extracted_root in configs/train_subset5000.yaml / val_subset1000.yaml in
 # sync with each report's `extracted_data_root` (the archive adds a root folder).
 #
 # Stages 1-3 (preprocess + training manifests -> calibration -> model training)
@@ -86,11 +86,11 @@ decisions:
 
 jobs:
   - name: train-subset5000
-    pipeline_config: configs/train_scaled.yaml
+    pipeline_config: configs/train_subset5000.yaml
     manifest_output_dir: data/training/train-subset5000
 
   - name: val-subset1000
-    pipeline_config: configs/val_scaled.yaml
+    pipeline_config: configs/val_subset1000.yaml
     manifest_output_dir: data/training/val-subset1000
 
 trace_augmentation:

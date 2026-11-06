@@ -1,15 +1,9 @@
 from __future__ import annotations
 
-import argparse
-import json
-from pathlib import Path
-
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 from torchvision.models import EfficientNet_V2_S_Weights, efficientnet_v2_s
-
-from seepat.artifacts import atomic_write_json
 
 IMAGENET_MEAN = (0.485, 0.456, 0.406)
 IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -23,15 +17,6 @@ def _classifier_input_features(backbone: nn.Module) -> int:
     if not linear_layers:
         raise TypeError("EfficientNet classifier must contain a linear layer")
     return linear_layers[-1].in_features
-
-
-def parameter_counts(model: nn.Module) -> dict[str, int]:
-    return {
-        "total": sum(parameter.numel() for parameter in model.parameters()),
-        "trainable": sum(
-            parameter.numel() for parameter in model.parameters() if parameter.requires_grad
-        ),
-    }
 
 
 class TemporalResidualBlock(nn.Module):
@@ -258,95 +243,3 @@ class TempCNNOnlyEventClassifier(nn.Module):
 
     def forward(self, video: Tensor, frame_mask: Tensor | None = None) -> Tensor:
         return self.classifier(self.temporal_encoder(self.extract_frame_features(video), frame_mask))
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(prog="python -m seepat.models.cnn_temporal")
-    parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
-    parser.add_argument("--frames", type=int, default=16)
-    parser.add_argument("--image-size", type=int, default=224)
-    parser.add_argument("--manifest", type=Path)
-    parser.add_argument("--project-root", type=Path, default=Path("."))
-    parser.add_argument("--report", type=Path)
-    parser.add_argument(
-        "--pretrained",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-    )
-    parser.add_argument(
-        "--freeze-backbone",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-    )
-    args = parser.parse_args()
-    if args.device == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("CUDA was requested but is not available")
-    if args.frames < 1 or args.image_size < 1:
-        raise ValueError("frames and image-size must be positive")
-
-    device = torch.device(args.device)
-    torch.hub.set_dir(str(args.project_root / ".cache" / "torch"))
-    model = EfficientNetTempCNNEventClassifier(
-        pretrained=args.pretrained,
-        freeze_backbone=args.freeze_backbone,
-    ).to(device).eval()
-    event_id = None
-    label = None
-    frame_mask = None
-    if args.manifest is not None:
-        from seepat.training.dataset import MouthEventDataset
-
-        dataset = MouthEventDataset(
-            manifest_path=args.manifest,
-            project_root=args.project_root,
-            sequence_length=args.frames,
-            image_size=args.image_size,
-        )
-        event = dataset[0]
-        sample = event["video"].unsqueeze(0).to(device)
-        frame_mask = event["frame_mask"].unsqueeze(0).to(device)
-        event_id = event["event_id"]
-        label = int(event["label"].item())
-    else:
-        sample = torch.zeros(
-            (1, 3, args.frames, args.image_size, args.image_size),
-            device=device,
-        )
-    if device.type == "cuda":
-        torch.cuda.reset_peak_memory_stats(device)
-    with torch.inference_mode():
-        spatial_features = model.extract_frame_features(sample)
-        embedding = model.temporal_encoder(spatial_features, frame_mask)
-        logits = model.classifier(embedding)
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-
-    report: dict[str, object] = {
-        "purpose": "wiring_check_only_not_a_reported_experiment",
-        "model": "torchvision.efficientnet_v2_s+tempcnn",
-        "pretrained": args.pretrained,
-        "pretrained_weights": (
-            "EfficientNet_V2_S_Weights.IMAGENET1K_V1" if args.pretrained else None
-        ),
-        "backbone_frozen": args.freeze_backbone,
-        "device": str(device),
-        "input_shape": list(sample.shape),
-        "spatial_feature_shape": list(spatial_features.shape),
-        "embedding_shape": list(embedding.shape),
-        "output_shape": list(logits.shape),
-        "event_id": event_id,
-        "label": label,
-        "valid_frames": int(frame_mask.sum().item()) if frame_mask is not None else args.frames,
-        "parameters": parameter_counts(model),
-        "peak_gpu_memory_bytes": (
-            torch.cuda.max_memory_allocated(device) if device.type == "cuda" else None
-        ),
-    }
-    if args.report is not None:
-        report["report"] = args.report.as_posix()
-        atomic_write_json(args.report, report)
-    print(json.dumps(report, indent=2))
-
-
-if __name__ == "__main__":
-    main()

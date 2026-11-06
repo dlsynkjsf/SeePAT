@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from seepat.preprocessing.face import (
@@ -51,40 +53,16 @@ def test_normalized_vild_rejects_degenerate_mouth_width() -> None:
 
 
 def test_full_video_trace_keeps_invalid_and_multiple_face_frames(tmp_path) -> None:
-    class FakeCapture:
-        def __init__(self) -> None:
-            self.position = 0
-
-        def isOpened(self) -> bool:
-            return True
-
-        def read(self):
-            if self.position == 3:
-                return False, None
-            self.position += 1
-            return True, object()
-
-        def get(self, _property):
-            return 0.0
-
-        def release(self) -> None:
-            return None
-
-    class FakeMesh:
-        def close(self) -> None:
-            return None
-
-    capture = FakeCapture()
+    frames = iter([(True, object()) for _ in range(3)])
+    capture = SimpleNamespace(
+        isOpened=lambda: True,
+        read=lambda: next(frames, (False, None)),
+        get=lambda _: 0.0,
+        release=lambda: None,
+    )
     analyzer = object.__new__(MouthEventAnalyzer)
-    analyzer.cv2 = type(
-        "FakeCv2",
-        (),
-        {
-            "CAP_PROP_POS_MSEC": 0,
-            "VideoCapture": staticmethod(lambda path: capture),
-        },
-    )()
-    analyzer._create_face_mesh = lambda: FakeMesh()
+    analyzer.cv2 = SimpleNamespace(CAP_PROP_POS_MSEC=0, VideoCapture=lambda _: capture)
+    analyzer._create_face_mesh = lambda: SimpleNamespace(close=lambda: None)
     measurements = iter(
         [
             (1, 0.1, None, 2.0, 10.0),

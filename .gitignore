@@ -46,6 +46,13 @@ lightning_logs/
 *.pth
 *.onnx
 
+# Local run receipts
+/*_commit.txt
+/*_verification.json
+/*_input_audit.json
+/*_manifest_sha256.txt
+/*_reference_sha256.txt
+
 # Model and notebook caches
 .cache/
 .huggingface/
@@ -53,7 +60,12 @@ lightning_logs/
 
 # Editor and operating-system files
 .vscode/
+.playwright-cli/
 .idea/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# Generated source handoff and recoverable workspace backup
+delivery/
+research/workspace_before_submission/

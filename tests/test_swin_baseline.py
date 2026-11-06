@@ -6,7 +6,7 @@ torch = pytest.importorskip("torch")
 model_module = pytest.importorskip("seepat.models.swin_baseline")
 nn = torch.nn
 SwinBaseEventClassifier = model_module.SwinBaseEventClassifier
-parameter_counts = model_module.parameter_counts
+from seepat.models import parameter_counts
 
 
 class TinyVideoBackbone(nn.Module):

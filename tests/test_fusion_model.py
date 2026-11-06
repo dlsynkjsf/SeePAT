@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from model_fixtures import tiny_fusion_model as _tiny_model
 
 torch = pytest.importorskip("torch")
 model_module = pytest.importorskip("seepat.models.fusion")
@@ -8,47 +9,9 @@ from seepat.evidence import FUSION_EVIDENCE_FIELDS
 
 nn = torch.nn
 HybridFusionEventClassifier = model_module.HybridFusionEventClassifier
-parameter_counts = model_module.parameter_counts
+from seepat.models import parameter_counts
+
 EVIDENCE_WIDTH = len(FUSION_EVIDENCE_FIELDS)
-
-
-class TinySwinBackbone(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.projection = nn.Linear(3, 6)
-        self.head = nn.Linear(6, 10)
-
-    def forward(self, video: torch.Tensor) -> torch.Tensor:
-        return self.projection(video.mean(dim=(2, 3, 4)))
-
-
-class TinyFrameBackbone(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.projection = nn.Linear(3, 6)
-        self.classifier = nn.Sequential(nn.Dropout(0.1), nn.Linear(6, 10))
-
-    def forward(self, frames: torch.Tensor) -> torch.Tensor:
-        return self.classifier(self.projection(frames.mean(dim=(2, 3))))
-
-
-def _tiny_model(
-    freeze_backbone: bool = False,
-    unfreeze_final_backbone_stages: bool = False,
-) -> HybridFusionEventClassifier:
-    return HybridFusionEventClassifier(
-        pretrained=False,
-        freeze_backbone=freeze_backbone,
-        unfreeze_final_backbone_stages=unfreeze_final_backbone_stages,
-        swin_backbone=TinySwinBackbone(),
-        frame_backbone=TinyFrameBackbone(),
-        evidence_hidden=8,
-        temporal_channels=8,
-        embedding_features=7,
-        fusion_dimension=8,
-        fusion_heads=2,
-        dropout=0.0,
-    )
 
 
 def test_fusion_returns_logits_without_unsupervised_sync_gap_head() -> None:

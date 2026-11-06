@@ -1,0 +1,72 @@
+{
+  "version": "pia-assessment-1000-v2",
+  "requested_videos": 1000,
+  "output": "outputs/external_assessment/pia",
+  "source_root": "data/raw/deepfake_eval_2024_locked",
+  "selection": {
+    "path": "configs/h1_assess_subset1000.v1.json",
+    "sha256": "0dbb93699075c7589029cbf169bad86615c3a3ef3e9590cd9440fad82fb93212"
+  },
+  "image": "sha256:746771aa4d2f5ff6305b5531784c10ee577f57977672e05136beeb19acff2cb7",
+  "setup": {
+    "path": "outputs/pia_feasibility_v1/setup.json",
+    "sha256": "0a4ea126f4b903212dae3400ffe68328615dfe76820727e69bc1d6ee5116aaf8"
+  },
+  "work_dir": ".tools/pia_feasibility_v1",
+  "checkpoint": {
+    "path": ".tools/pia_feasibility_v1/source/checkpoints/best_model.pth",
+    "sha256": "188e1c7f1a252b88a1971ed7706e76d2a76cb3955f0b905a4af01d1c39da1d09"
+  },
+  "metadata": {
+    "path": "data/raw/deepfake_eval_2024_locked/video-metadata-publish-with-links.csv",
+    "sha256": "0751b23143bd5b5187caf1c5722c15a7fd9e51c6bc7c09ef74521498e7ef0bc1"
+  },
+  "parity_proof": {
+    "path": "outputs/pia_external_cpu_100_v4/consumed_identity_parity_v1/proof.json",
+    "sha256": "008ac216c9d462d9a73f1fc16e8b7817ef86c80cb4c4b87a36e3a4947c292d62"
+  },
+  "reuse": {
+    "output": "outputs/pia_external_cpu_100_v4",
+    "config_sha256": "fb283fd0ebab650701672c75f460d3e76af8d755b947c089fbfbf6d1204e554d"
+  },
+  "runtime_helpers": [
+    "scripts/pia_cpu_consumed_runtime.py",
+    "scripts/pia_cpu_identity_runtime.py",
+    "scripts/pia_cpu_spin_runtime.py"
+  ],
+  "phonemes": [
+    "b",
+    "f",
+    "i",
+    "k",
+    "m",
+    "o",
+    "p",
+    "s",
+    "t",
+    "v",
+    "w",
+    "\u00c3\u00a6",
+    "\u00c9\u00b9",
+    "\u00ca\u0192"
+  ],
+  "case_timeout_seconds": 86400,
+  "source_sha256": {
+    "scripts/pia_assessment.py": "40a1261717cd76674d150e95c9e79390c72c2a13eec11923ab519fc5a2b3cd73",
+    "scripts/assessment_runtime.py": "04fc080f6e4e498b42307f50f5a4aacd8e8d3fd1cd6d2be70803b7c77f047903",
+    "scripts/pia_baseline.py": "798786e3f23a819688e611518148e86d6cfa9a2b0aa069e488f973a8cc586c67",
+    "src/seepat/artifacts.py": "30c000485baeb7e2c6dfceb64c990635c966dccebeb2d0994862040d740bf8f6",
+    "src/seepat/live_progress.py": "f17607c13e39cc69bbb66e892e75f2439c5e1ddf6ae1a74bd296ee00630bd9df",
+    ".tools/pia_feasibility_v1/source/main.py": "f00bce1a96dce154f304db2db73ad51fd6e60cdf86f424e3143939687a0df499",
+    ".tools/pia_feasibility_v1/source/src/model.py": "1ea99adb244bb53d1ad5f8e302fe1729dbc0a7e9e446391e521d849983ed3c80",
+    ".tools/pia_feasibility_v1/source/src/utils.py": "800401f4905e020d3811150ec36e5fd892d79319dd9d357e8ecbafbb2ceb501f",
+    "scripts/pia_cpu_consumed_runtime.py": "42c550b0d401bdac3e9cd9e05014311ceed4fe48ad87d4ba392a6fdcc32902ba",
+    "scripts/pia_cpu_identity_runtime.py": "cc64d1ff17ec9426f7c1cef91cf9bf8c9dfce078831b3d84fcb5e5bdc9835bb7",
+    "scripts/pia_cpu_spin_runtime.py": "828dd7f3c82e30b4333648dcecbcfb90f59619261729f18c7672cea2ba1a6b6c"
+  },
+  "decision_rule": "P(fake) > 0.5",
+  "labels": "read only after all requested predictions are committed and sealed",
+  "training_performed": false,
+  "sampling": "exact unchanged parent 1,000-video filename-ranked selection; no replacement",
+  "device": "cpu"
+}

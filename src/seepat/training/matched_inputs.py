@@ -167,9 +167,10 @@ class MatchedClipDataset:
         return dict(Counter(row["kind"] for row in self.rows))
 
     def __getitem__(self, index):
-        import cv2
         import numpy as np
         import torch
+
+        from seepat.training.dataset import decode_clip_frames
 
         row = self.rows[index]
         if row["kind"] == "bilabial":
@@ -179,17 +180,7 @@ class MatchedClipDataset:
         path = inside(self.root, row["mouth_clip_path"])
         if file_sha256(path) != window["clip_sha256"]:
             raise ValueError("Context clip hash mismatch")
-        capture = cv2.VideoCapture(str(path))
-        frames = []
-        try:
-            while True:
-                ok, frame = capture.read()
-                if not ok:
-                    break
-                frames.append(cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
-                                         (self.image_size, self.image_size)))
-        finally:
-            capture.release()
+        frames = decode_clip_frames(path, self.image_size)
         if len(frames) != 16:
             raise ValueError("Context decoder must retain exactly 16 stored slots")
         array = np.stack(frames)

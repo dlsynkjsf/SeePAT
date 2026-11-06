@@ -1,0 +1,7 @@
+*
+!h1_frontend/
+!h1_frontend/Dockerfile
+!h1_frontend/onnx-cuda12.txt
+!pia/
+!pia/author-requirements.txt
+!pia/constraints.txt

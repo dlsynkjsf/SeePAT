@@ -1,0 +1,14 @@
+{
+  "version": "raw-local-inputs-v1",
+  "dataset_source": "local-unlabelled",
+  "split": "local",
+  "videos": [
+    {
+      "source": {
+        "path": "data/extracted/avpp/val-subset1000/val/vox_celeb_2/id05283/t2f-tVS9SF4/00187/fake_video_fake_audio.mp4",
+        "sha256": "579609c554cdb99048b61235d839657d6da8a2979520a1ac73bffc21f0d7fb7f"
+      },
+      "origin": "local-demo"
+    }
+  ]
+}

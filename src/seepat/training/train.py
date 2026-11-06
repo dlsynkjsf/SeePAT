@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import json
 import random
 from collections.abc import Callable
@@ -19,12 +18,13 @@ from torch.utils.data import DataLoader, Dataset, Subset
 from seepat.artifacts import atomic_write_json
 from seepat.artifacts import file_sha256 as _sha256
 from seepat.live_progress import ProgressCallback
+from seepat.models import parameter_counts
 from seepat.models.cnn_temporal import (
     EfficientNetTempCNNEventClassifier,
     TempCNNOnlyEventClassifier,
 )
 from seepat.models.fusion import FUSION_MODEL_NAME, HybridFusionEventClassifier
-from seepat.models.swin_baseline import SwinBaseEventClassifier, parameter_counts
+from seepat.models.swin_baseline import SwinBaseEventClassifier
 from seepat.training.metrics import (
     aggregate_video_probabilities,
     binary_classification_metrics,
@@ -1335,109 +1335,9 @@ def train_from_manifests(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="python -m seepat.training.train")
-    parser.add_argument("--train-manifest", type=Path, required=True)
-    parser.add_argument("--val-manifest", type=Path, required=True)
-    parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--project-root", type=Path, default=Path("."))
-    parser.add_argument("--resume-from", type=Path)
-    parser.add_argument("--initialize-from", type=Path)
-    parser.add_argument("--model", choices=SUPPORTED_MODELS, default=SWIN_BASE_MODEL)
-    parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
-    parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--workers", type=int, default=0)
-    parser.add_argument("--learning-rate", type=float, default=1e-4)
-    parser.add_argument("--weight-decay", type=float, default=0.01)
-    parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
-    parser.add_argument("--sequence-length", type=int, default=16)
-    parser.add_argument("--image-size", type=int, default=224)
-    parser.add_argument("--seed", type=int, default=20260823)
-    parser.add_argument("--early-stopping-patience", type=int, default=3)
-    parser.add_argument(
-        "--max-train-batches",
-        type=int,
-        help="Limit Train batches per epoch and mark the run as a preflight",
-    )
-    parser.add_argument(
-        "--max-val-batches",
-        type=int,
-        help="Limit Validation batches per epoch and mark the run as a preflight",
-    )
-    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument(
-        "--pretrained",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-    )
-    parser.add_argument(
-        "--freeze-backbone",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-    )
-    parser.add_argument(
-        "--unfreeze-final-backbone-stages",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-    )
-    parser.add_argument("--backbone-learning-rate", type=float)
-    parser.add_argument(
-        "--class-weighting",
-        choices=("balanced", "balanced_global", "none"),
-        default="balanced",
-    )
-    parser.add_argument("--positive-class-weight-ratio", type=float)
-    parser.add_argument(
-        "--loss-function",
-        choices=("cross_entropy", "focal"),
-        default="cross_entropy",
-    )
-    parser.add_argument("--focal-gamma", type=float, default=2.0)
-    parser.add_argument("--supervision", choices=("event", VIDEO_MAX), default="event")
-    parser.add_argument(
-        "--selection-metric",
-        choices=(VIDEO_F1_SELECTION, VIDEO_BALANCED_ACCURACY_SELECTION),
-        default=VIDEO_F1_SELECTION,
-    )
-    args = parser.parse_args()
+    from seepat.training.cli import main as run_cli
 
-    options = TrainingOptions(
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        workers=args.workers,
-        learning_rate=args.learning_rate,
-        weight_decay=args.weight_decay,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        sequence_length=args.sequence_length,
-        image_size=args.image_size,
-        seed=args.seed,
-        amp=args.amp,
-        freeze_backbone=args.freeze_backbone,
-        unfreeze_final_backbone_stages=args.unfreeze_final_backbone_stages,
-        backbone_learning_rate=args.backbone_learning_rate,
-        class_weighting=args.class_weighting,
-        positive_class_weight_ratio=args.positive_class_weight_ratio,
-        loss_function=args.loss_function,
-        focal_gamma=args.focal_gamma,
-        supervision=args.supervision,
-        selection_metric=args.selection_metric,
-        early_stopping_patience=args.early_stopping_patience,
-        max_train_batches=args.max_train_batches,
-        max_validation_batches=args.max_val_batches,
-    )
-    report = train_from_manifests(
-        train_manifest=args.train_manifest,
-        validation_manifest=args.val_manifest,
-        output_dir=args.output_dir,
-        project_root=args.project_root,
-        options=options,
-        device_name=args.device,
-        pretrained=args.pretrained,
-        model_name=args.model,
-        resume_from=args.resume_from,
-        initialize_from=args.initialize_from,
-    )
-    print(json.dumps(report, indent=2))
+    run_cli()
 
 
 if __name__ == "__main__":
