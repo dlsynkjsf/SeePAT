@@ -1,4 +1,4 @@
-"""Opt-in source-group folds for the paper's ablations, using the existing trainer.
+"""Prepare source-group folds for ablation studies with the existing trainer.
 
 Official Validation remains development data. Held-out Train folds are scored
 only after checkpoint/threshold selection; external data is never accepted here.
@@ -83,7 +83,6 @@ def source_group_folds(train: list[dict], validation: list[dict], folds: int, se
     _validate_rows(train, "train")
     _validate_rows(validation, "val")
     _disjoint(train, validation)
-    # Sort first so CSV ordering cannot change which source group enters a fold.
     ordered = sorted(train, key=lambda row: row["event_id"])
     splitter = StratifiedGroupKFold(n_splits=folds, shuffle=True, random_state=seed)
     result = []
@@ -184,7 +183,6 @@ def load_study(job: StudyJob) -> dict:
             raise ValueError("Fold calibration was not fitted on this fold's Train subset")
         for name, path in fold["manifests"].items():
             exported = read_csv_rows(Path(path))
-            # Calibration adds columns; no source identity, label or clip may change.
             originals = {r["event_id"]: r for r in rows[name]}
             if len(exported) != len(originals) or {r["event_id"] for r in exported} != set(originals):
                 raise ValueError("Calibrated fold changed the event inventory")

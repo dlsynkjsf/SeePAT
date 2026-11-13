@@ -1,0 +1,17 @@
+{
+  "revision": "91834722cb5b814da6dbb0e16cf4931d3484d06e",
+  "source_urls": [
+    "https://raw.githubusercontent.com/skrantidatta/PIA/91834722cb5b814da6dbb0e16cf4931d3484d06e/README.md",
+    "https://raw.githubusercontent.com/skrantidatta/PIA/91834722cb5b814da6dbb0e16cf4931d3484d06e/requirements.txt",
+    "https://raw.githubusercontent.com/skrantidatta/PIA/91834722cb5b814da6dbb0e16cf4931d3484d06e/main.py",
+    "https://raw.githubusercontent.com/skrantidatta/PIA/91834722cb5b814da6dbb0e16cf4931d3484d06e/src/model.py",
+    "https://raw.githubusercontent.com/skrantidatta/PIA/91834722cb5b814da6dbb0e16cf4931d3484d06e/src/utils.py",
+    "https://raw.githubusercontent.com/skrantidatta/PIA/91834722cb5b814da6dbb0e16cf4931d3484d06e/checkpoints/best_model.pth"
+  ],
+  "source_sha256": {
+    ".tools/pia_feasibility_v1/source/main.py": "f00bce1a96dce154f304db2db73ad51fd6e60cdf86f424e3143939687a0df499",
+    ".tools/pia_feasibility_v1/source/src/model.py": "1ea99adb244bb53d1ad5f8e302fe1729dbc0a7e9e446391e521d849983ed3c80",
+    ".tools/pia_feasibility_v1/source/src/utils.py": "800401f4905e020d3811150ec36e5fd892d79319dd9d357e8ecbafbb2ceb501f"
+  },
+  "modifications": "None; these are the captured author source files"
+}

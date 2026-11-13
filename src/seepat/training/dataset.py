@@ -1,13 +1,10 @@
 from __future__ import annotations
 
-import argparse
-import json
-import math
 from pathlib import Path
 from typing import Any
 
 from seepat.artifacts import read_csv_rows
-from seepat.evidence import calibrated_manifest_contract, evidence_feature_values
+from seepat.evidence import calibrated_manifest_contract, evidence_feature_values, finite_float
 from seepat.evidence import evidence_coverage as _evidence_coverage
 
 FEATURE_FIELDS = (
@@ -64,27 +61,38 @@ def numeric_feature_values(row: dict[str, str]) -> tuple[list[float], list[bool]
     values: list[float] = []
     mask: list[bool] = []
     for field in FEATURE_FIELDS:
-        try:
-            value = float(row.get(field, ""))
-        except (TypeError, ValueError):
-            value = 0.0
-            available = False
-        else:
-            available = math.isfinite(value)
-            if not available:
-                value = 0.0
-        values.append(value)
-        mask.append(available)
+        value = finite_float(row.get(field, ""))
+        values.append(value if value is not None else 0.0)
+        mask.append(value is not None)
     return values, mask
 
 
-class MouthEventDataset:
-    """Loads fixed-length mouth clips and numerical bilabial features.
+def decode_clip_frames(path: Path, image_size: int, *, source_size=None):
+    """Decode RGB frames once; callers retain their own sampling and label rules."""
+    import cv2
 
-    Each sample exposes both feature groups: the base motion features used by
-    the CNN-temporal baseline and the calibrated biological-alignment evidence
-    consumed by the hybrid fusion model (see :mod:`seepat.evidence`).
-    """
+    capture = cv2.VideoCapture(str(path))
+    frames = []
+    try:
+        if not capture.isOpened():
+            raise ValueError(f"Could not open mouth clip: {path}")
+        while True:
+            ok, frame = capture.read()
+            if not ok:
+                break
+            if source_size is not None and frame.shape[:2] != source_size:
+                raise ValueError("Context storage must retain 112px mouth-region frames")
+            frames.append(cv2.resize(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB),
+                                     (image_size, image_size)))
+    finally:
+        capture.release()
+    if not frames:
+        raise ValueError(f"Mouth clip contains no readable frames: {path}")
+    return frames
+
+
+class MouthEventDataset:
+    """Fixed-length mouth clips with motion features and calibrated evidence masks."""
 
     def __init__(
         self,
@@ -148,36 +156,22 @@ class MouthEventDataset:
         return _evidence_coverage(self.rows)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
-        try:
-            import cv2
-            import numpy as np
-            import torch
-        except ImportError as error:
-            raise RuntimeError(
-                'Clip loading requires the training dependencies: pip install -e ".[train]"'
-            ) from error
-
         row = self.rows[index]
         relative_path = Path(row["mouth_clip_path"].replace("\\", "/"))
         clip_path = (
             relative_path if relative_path.is_absolute() else self.project_root / relative_path
         )
-        capture = cv2.VideoCapture(str(clip_path))
-        if not capture.isOpened():
-            raise RuntimeError(f"Could not open mouth clip: {clip_path}")
-
-        frames = []
         try:
-            while True:
-                ok, frame = capture.read()
-                if not ok:
-                    break
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frames.append(cv2.resize(frame, (self.image_size, self.image_size)))
-        finally:
-            capture.release()
-        if not frames:
-            raise RuntimeError(f"Mouth clip contains no readable frames: {clip_path}")
+            import numpy as np
+            import torch
+
+            frames = decode_clip_frames(clip_path, self.image_size)
+        except ImportError as error:
+            raise RuntimeError(
+                'Clip loading requires the training dependencies: pip install -e ".[train]"'
+            ) from error
+        except ValueError as error:
+            raise RuntimeError(str(error)) from error
 
         indices, frame_mask = sequence_frame_indices(len(frames), self.sequence_length)
         array = np.ascontiguousarray(np.stack([frames[position] for position in indices]))
@@ -188,6 +182,7 @@ class MouthEventDataset:
         return {
             "video": video,
             "frame_mask": torch.tensor(frame_mask, dtype=torch.bool),
+            "decoded_frame_count": len(frames),
             "features": torch.tensor(feature_values, dtype=torch.float32),
             "feature_mask": torch.tensor(feature_mask, dtype=torch.bool),
             "evidence_features": torch.tensor(evidence_values, dtype=torch.float32),
@@ -203,36 +198,3 @@ class MouthEventDataset:
             ),
             "phoneme": row["phoneme"],
         }
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(prog="python -m seepat.training.dataset")
-    parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--project-root", type=Path, default=Path("."))
-    parser.add_argument("--split")
-    parser.add_argument("--sequence-length", type=int, default=16)
-    parser.add_argument("--image-size", type=int, default=224)
-    args = parser.parse_args()
-
-    dataset = MouthEventDataset(
-        manifest_path=args.manifest,
-        project_root=args.project_root,
-        dataset_split=args.split,
-        sequence_length=args.sequence_length,
-        image_size=args.image_size,
-    )
-    sample = dataset[0]
-    report = {
-        "dataset_events": len(dataset),
-        "event_id": sample["event_id"],
-        "video_id": sample["video_id"],
-        "video_shape": list(sample["video"].shape),
-        "feature_shape": list(sample["features"].shape),
-        "valid_frames": int(sample["frame_mask"].sum().item()),
-        "label": int(sample["label"].item()),
-    }
-    print(json.dumps(report, indent=2))
-
-
-if __name__ == "__main__":
-    main()

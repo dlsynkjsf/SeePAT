@@ -1,16 +1,7 @@
-"""Reasoning-LLM forensic trace (Figure 4.1 XAI output).
+"""Explain saved verdicts without changing their scores or decisions.
 
-The trace layer is strictly downstream of the verdict:
-
-* it consumes the frozen verdict artifacts (``evaluation.json``,
-  ``video_verdicts.csv``, ``event_predictions.csv``) as read-only evidence;
-* it never recomputes probabilities, thresholds or verdicts;
-* the reasoning LLM only translates the supplied numerical evidence into
-  human-readable text, with grounding rules that forbid inventing evidence.
-
-The default client is a deterministic template renderer that runs fully
-offline. :class:`OpenAICompatibleClient` provides an opt-in HTTP text client;
-the model response is advisory text and never enters the prediction path.
+Reports use an offline template by default. The optional HTTP client receives
+only the supplied evidence and returns advisory text, outside the prediction path.
 """
 
 from __future__ import annotations
@@ -58,6 +49,11 @@ def _read_json(path: Path) -> dict[str, object]:
 
 
 def _event_evidence(record: dict[str, str]) -> dict[str, str]:
+    if record.get("kind") == "context":
+        if record.get("phoneme") or any(record.get(f"{field}_available", "").lower() == "true"
+                                         for field in FUSION_EVIDENCE_FIELDS):
+            raise ValueError("Context explanation cannot claim phoneme or calibrated evidence")
+        return {}
     evidence: dict[str, str] = {}
     for field in FUSION_EVIDENCE_FIELDS:
         value = record.get(field, "").strip()
@@ -137,6 +133,7 @@ def build_evidence_bundle(
                 "events": [
                     {
                         "event_id": event.get("event_id", ""),
+                        **({"kind": event["kind"]} if "kind" in event else {}),
                         "phoneme": event.get("phoneme", ""),
                         "manipulated_probability": event.get(
                             "manipulated_probability", ""
@@ -176,12 +173,16 @@ def build_evidence_bundle(
         "split": evaluation.get("split"),
         "threshold": evaluation.get("threshold"),
         "aggregation": evaluation.get("aggregation"),
+        **({"score_interpretation": evaluation["supervision"]["event_score_semantics"]}
+           if evaluation.get("supervision") else {}),
         "videos_scored": sum(row["verdict"] != "not_evaluated" for row in verdict_rows),
         "videos_requested": len(verdict_rows),
         "videos_not_evaluated": sum(row["verdict"] == "not_evaluated" for row in verdict_rows),
         "videos_reported": len(videos),
         "videos_omitted": max(0, len(verdict_rows) - len(videos)),
         "events_scored": len(event_rows),
+        **({"context_clips_scored": sum(row.get("kind") == "context" for row in event_rows)}
+           if any("kind" in row for row in event_rows) else {}),
         "events_with_missing_evidence_values": sum(count > 0 for count in missing_counts),
         "missing_evidence_values": sum(missing_counts),
         "videos": videos,
@@ -208,6 +209,13 @@ def render_evidence_summary(bundle: dict[str, object]) -> str:
         f"{bundle.get('missing_evidence_values')} missing evidence values)"
     )
     lines.append("")
+    if bundle.get("score_interpretation"):
+        lines.append(
+            "Video-supervised event scores are evidence contributions to the video verdict, "
+            "not probabilities of localized phoneme manipulation. The highest-scoring event "
+            "is not a verified manipulated interval."
+        )
+        lines.append("")
     videos = bundle.get("videos")
     if not isinstance(videos, list) or not videos:
         lines.append("No evaluated videos were available.")
@@ -229,6 +237,11 @@ def render_evidence_summary(bundle: dict[str, object]) -> str:
             for event in events:
                 if not isinstance(event, dict):
                     continue
+                if event.get("kind") == "context":
+                    lines.append(f"- Visual-only context clip {event.get('event_id')}: video evidence score="
+                                 f"{event.get('manipulated_probability')}; no phoneme/VILD evidence. "
+                                 "This is not a measured bilabial timing anomaly or verified localization.")
+                    continue
                 evidence = event.get("evidence")
                 detail = "; ".join(
                     f"{key}={value}"
@@ -238,7 +251,8 @@ def render_evidence_summary(bundle: dict[str, object]) -> str:
                 )
                 lines.append(
                     f"- Event {event.get('event_id')} (/{event.get('phoneme')}/): "
-                    f"p(manipulated)={event.get('manipulated_probability')}"
+                    + ("video evidence score=" if bundle.get("score_interpretation") else "p(manipulated)=")
+                    + str(event.get("manipulated_probability"))
                     + (f"; {detail}" if detail else "; no calibrated evidence available")
                 )
                 if event.get("missing_fields"):
@@ -257,7 +271,14 @@ def build_prompts(bundle: dict[str, object]) -> tuple[str, str]:
         + json.dumps(bundle, indent=2, sort_keys=True)
         + "\n\nWrite the forensic trace for the most relevant videos."
     )
-    return SYSTEM_GROUNDING_RULES, user_prompt
+    grounding = SYSTEM_GROUNDING_RULES
+    if bundle.get("score_interpretation"):
+        grounding += (
+            " This model was supervised on complete video labels. Event scores are video "
+            "evidence contributions, not verified probabilities that a phoneme/interval is "
+            "manipulated. Do not claim temporal localization from the highest-scoring event."
+        )
+    return grounding, user_prompt
 
 
 class OpenAICompatibleClient:

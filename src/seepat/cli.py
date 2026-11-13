@@ -69,6 +69,7 @@ def create_parser() -> ArgumentParser:
     cohort.add_argument("--category", action="append", dest="categories")
     cohort.add_argument("--per-category", type=int, default=250)
     cohort.add_argument("--seed", type=int, default=20260928)
+    cohort.add_argument("--purpose", default="phase2_outer_development_cohort")
     cohort.add_argument("--exclude-manifest", type=Path, action="append", required=True)
 
     extract = commands.add_parser(
@@ -159,7 +160,7 @@ def main() -> None:
             seed=args.seed,
             excluded_splits=(),
             excluded_manifests=args.exclude_manifest,
-            purpose="phase2_outer_development_cohort",
+            purpose=args.purpose,
         )
         print(json.dumps(summary, indent=2))
         return

@@ -1,1 +1,1 @@
-"""Restartable preprocessing components for the SeePAT pilot."""
+"""Audio preparation, alignment, mouth tracking, and evidence extraction."""

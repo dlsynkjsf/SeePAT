@@ -1,20 +1,9 @@
-"""Binary event classification, maximum event aggregation and deepfake verdict.
+"""Score events, take each video's maximum probability, and apply a frozen cutoff.
 
-Implements the Figure 4.1 classification chain: every bilabial mouth event is
-scored by the trained model (event-level manipulation probability), video
-probabilities use maximum event aggregation, and a *frozen* threshold turns the
-probability into the deepfake verdict.
-
-Reproducibility rules:
-
-* Production decisions require a provenance-checked Validation threshold artifact.
-  An explicit threshold is allowed only in labelled engineering-preflight mode.
-* This development entry point currently evaluates AV++ Validation only.
-  External evaluation remains locked until the final experiment is frozen.
-* Calibration artifacts are read-only upstream inputs; this module never fits
-  or refits anything.
-* Videos that produced no scorable bilabial events are reported as
-  ``not_evaluated`` instead of being silently dropped.
+Production decisions use a verified Validation cutoff and read-only calibration.
+An explicit cutoff is allowed only in engineering preflight. Videos without
+scorable events remain ``not_evaluated``. This command accepts AV++ Validation;
+external assessment uses a separate route.
 """
 
 from __future__ import annotations
@@ -45,6 +34,11 @@ from seepat.training.metrics import (
     choose_balanced_accuracy_threshold,
 )
 from seepat.training.train import FUSION_MODEL, build_event_classifier, training_version_for_model
+from seepat.training.video_objective import (
+    VIDEO_MAX,
+    VIDEO_SUPERVISION_CONTRACT,
+    event_diagnostic_metrics,
+)
 
 VERDICT_VERSION = "verdict-v2"
 THRESHOLD_VERSION = "threshold-v2"
@@ -84,6 +78,7 @@ def load_evaluation_model(
         raise ValueError("The checkpoint is missing its model contract")
     if contract.get("training_version") != training_version_for_model(str(contract["model_name"])):
         raise ValueError("Unsupported checkpoint training version")
+    _validate_supervision(checkpoint, contract)
     model = build_event_classifier(
         model_name=str(contract["model_name"]),
         pretrained=False,
@@ -92,6 +87,26 @@ def load_evaluation_model(
     model.load_state_dict(checkpoint["model_state"])
     model.to(device).eval()
     return model, contract
+
+
+def _validate_supervision(checkpoint: dict[str, Any], contract: dict[str, Any]) -> None:
+    supervision = checkpoint.get("options", {}).get("supervision", "event")
+    if supervision not in {"event", VIDEO_MAX} or contract.get("supervision") != (
+        VIDEO_SUPERVISION_CONTRACT if supervision == VIDEO_MAX else None
+    ):
+        raise ValueError("Checkpoint supervision contract is missing or incompatible")
+    if supervision == VIDEO_MAX and (
+        contract.get("model_name") != FUSION_MODEL
+        or contract.get("seed") != checkpoint.get("options", {}).get("seed")
+    ):
+        raise ValueError("Video supervision requires full-fusion provenance and a matching seed")
+    if contract.get("clip_input_contract") is not None:
+        from seepat.training.matched_inputs import PROFILE_VERSION, validate_profile
+
+        matched = contract["clip_input_contract"]
+        if supervision != VIDEO_MAX or matched.get("version") != PROFILE_VERSION:
+            raise ValueError("Matched checkpoint has an incompatible clip/supervision contract")
+        validate_profile(matched["profile"])
 
 
 def _forward_batch(
@@ -143,7 +158,7 @@ def _score_events(
                     "video_id": batch["video_id"][index],
                     "subject_id": row.get("subject_id", ""),
                     "phoneme": row.get("phoneme", ""),
-                    "label": int(batch["label"][index].item()),
+                    "label": ("" if int(batch["label"][index].item()) == -1 else int(batch["label"][index].item())),
                     "video_label": int(batch["video_label"][index].item()),
                     "manipulated_probability": float(probabilities[index]),
                     "sync_gap_score": (
@@ -154,6 +169,8 @@ def _score_events(
                     "evidence_available": int(evidence_mask.sum().item()),
                     "evidence_total": int(evidence_mask.numel()),
                 }
+                if "kind" in row:
+                    record["kind"] = row["kind"]
                 for field_index, field in enumerate(FUSION_EVIDENCE_FIELDS):
                     available = bool(evidence_mask[field_index])
                     record[f"{field}_available"] = available
@@ -251,6 +268,8 @@ def evaluation_inputs(
     sequence_length: int | None = None, image_size: int | None = None,
     engineering_preflight: bool = False,
     validation_transfer: bool = False,
+    input_profile: dict | None = None,
+    project_root: Path = Path("."),
 ) -> tuple[dict[str, Any], dict[str, object]]:
     """Validate provenance before constructing a model or decoding any clip."""
     _validate_scope(split, dataset_source)
@@ -259,7 +278,7 @@ def evaluation_inputs(
         raise ValueError("Evaluation manifests must contain only the declared Validation split")
     if any(row.get("dataset_source", VALIDATION_SOURCE) != VALIDATION_SOURCE for row in rows):
         raise ValueError("External dataset rows cannot be used as AV++ Validation")
-    ids = [row.get("event_id") for row in rows]
+    ids = [row.get("event_id") or row.get("clip_id") for row in rows]
     if any(not event_id for event_id in ids) or len(ids) != len(set(ids)):
         raise ValueError("Evaluation event IDs must be nonempty and unique")
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False, mmap=True)
@@ -270,6 +289,7 @@ def evaluation_inputs(
     if contract.get("training_version") != training_version_for_model(model_name):
         raise ValueError("Unsupported checkpoint training version")
     options = checkpoint.get("options", {})
+    _validate_supervision(checkpoint, contract)
     if not engineering_preflight and (
         "max_train_batches" not in options or "max_validation_batches" not in options
         or options["max_train_batches"] is not None
@@ -293,10 +313,27 @@ def evaluation_inputs(
     if not validation_transfer and contract.get("validation_manifest_sha256") != manifest_hash:
         raise ValueError("Evaluation manifest differs from the checkpoint's Validation manifest")
     fusion_inputs = None
+    clip_inputs = None
     if model_name == FUSION_MODEL:
         from seepat.evidence import calibrated_manifest_contract
 
-        fusion_inputs = calibrated_manifest_contract(manifest_path, rows, allow_empty=True)
+        if contract.get("clip_input_contract") is not None:
+            from seepat.training.matched_inputs import MatchedClipDataset
+
+            profile = input_profile or contract["clip_input_contract"]["profile"]
+            if profile.get("initial_checkpoint_sha256") != contract["clip_input_contract"]["profile"]["initial_checkpoint_sha256"]:
+                raise ValueError("Evaluation matched profile changes the pinned initializer")
+            dataset = MatchedClipDataset(manifest_path, project_root, "val", profile,
+                                         contract["sequence_length"], contract["image_size"])
+            clip_inputs = dataset.input_contract
+            if (dataset.arm != contract["clip_input_contract"]["arm"]
+                    or (not validation_transfer and clip_inputs != contract["clip_input_contract"])):
+                raise ValueError("Evaluation matched-input arm or export differs")
+            fusion_inputs = dataset.calibration_contract
+        else:
+            if input_profile is not None:
+                raise ValueError("A legacy checkpoint cannot consume matched context inputs")
+            fusion_inputs = calibrated_manifest_contract(manifest_path, rows, allow_empty=True)
         if contract.get("fusion_inputs") != fusion_inputs:
             raise ValueError("Evaluation calibration differs from the frozen checkpoint inputs")
     provenance = {
@@ -305,11 +342,18 @@ def evaluation_inputs(
         "model_name": model_name, "training_version": contract["training_version"],
         "sequence_length": contract["sequence_length"], "image_size": contract["image_size"],
         "evidence_version": EVIDENCE_VERSION, "fusion_inputs": fusion_inputs,
+        **({"supervision": contract["supervision"]} if contract.get("supervision") else {}),
+        **({"clip_input_contract": clip_inputs} if clip_inputs is not None else {}),
     }
     return contract, provenance
 
 
 def _evaluation_dataset(manifest_path: Path, project_root: Path, contract: dict[str, Any]):
+    if contract.get("clip_input_contract") is not None:
+        from seepat.training.matched_inputs import MatchedClipDataset
+
+        return MatchedClipDataset(manifest_path, project_root, "val", contract["clip_input_contract"]["profile"],
+                                  contract["sequence_length"], contract["image_size"])
     return MouthEventDataset(
         manifest_path=manifest_path, project_root=project_root, dataset_split="val",
         sequence_length=contract["sequence_length"], image_size=contract["image_size"],
@@ -328,6 +372,7 @@ def select_threshold(
         raise ValueError("batch_size must be positive")
     contract, provenance = evaluation_inputs(
         manifest_path, checkpoint_path, split, dataset_source, sequence_length, image_size,
+        project_root=project_root,
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu") if device_name == "auto" else torch.device(device_name)
     dataset = _evaluation_dataset(manifest_path, project_root, contract)
@@ -379,6 +424,7 @@ def run_verdict(
     engineering_preflight: bool = False,
     validation_transfer: bool = False,
     progress: ProgressCallback | None = None,
+    input_profile: dict | None = None,
 ) -> dict[str, object]:
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
@@ -396,6 +442,7 @@ def run_verdict(
     contract, provenance = evaluation_inputs(
         manifest_path, checkpoint_path, split, dataset_source, sequence_length, image_size,
         engineering_preflight, validation_transfer,
+        input_profile=input_profile, project_root=project_root,
     )
     threshold_provenance = provenance
     if validation_transfer:
@@ -403,6 +450,8 @@ def run_verdict(
             **provenance,
             "validation_manifest_sha256": contract["validation_manifest_sha256"],
         }
+        if contract.get("clip_input_contract") is not None:
+            threshold_provenance["clip_input_contract"] = contract["clip_input_contract"]
     threshold_record = _load_threshold(
         threshold,
         threshold_artifact,
@@ -414,7 +463,10 @@ def run_verdict(
     if any((output_dir / name).resolve() in protected for name in ("event_predictions.csv", "video_verdicts.csv", "evaluation.json")):
         raise ValueError("Verdict output must not overwrite its inputs")
 
-    dataset = _evaluation_dataset(manifest_path, project_root, contract)
+    dataset_contract = contract
+    if validation_transfer and input_profile is not None and contract.get("clip_input_contract") is not None:
+        dataset_contract = {**contract, "clip_input_contract": {**contract["clip_input_contract"], "profile": input_profile}}
+    dataset = _evaluation_dataset(manifest_path, project_root, dataset_contract)
     records = []
     if threshold_record.get("predictions") and not validation_transfer:
         records = read_csv_rows(Path(threshold_record["predictions"]["path"]))
@@ -488,8 +540,8 @@ def run_verdict(
                 aggregated,
                 frozen_threshold,
             ),
-            "events": binary_classification_metrics(
-                [int(record["label"]) for record in records],
+            "events": event_diagnostic_metrics(
+                [int(record["label"]) if str(record["label"]) != "" else -1 for record in records],
                 probabilities,
                 frozen_threshold,
             ),
@@ -528,6 +580,9 @@ def run_verdict(
         "model_name": contract.get("model_name"),
         "model": contract.get("model"),
         "training_version": contract.get("training_version"),
+        **({"supervision": contract["supervision"],
+            "event_metrics_scope": "diagnostic against legacy event annotations; not supervised localization"}
+           if contract.get("supervision") else {}),
         "threshold": threshold_record,
         "aggregation": "maximum event probability",
         "event_count": len(records),

@@ -15,10 +15,9 @@ from seepat.config import PipelineSettings, load_pipeline_settings
 from seepat.live_progress import ProgressCallback
 from seepat.preprocessing.alignment import MfaDockerAligner
 from seepat.preprocessing.face import MouthEventAnalyzer
+from seepat.preprocessing.processor import VideoProcessor
 from seepat.preprocessing.transcription import WhisperTranscriber
-from seepat.video_processor import PilotVideoProcessor
 
-# Raw-pixel measurements are an additive sidecar, not a preprocessing invalidation.
 PIPELINE_VERSION = "pilot-v4"
 ELIGIBILITY_REPORT_FIELDS = (
     "video_id",
@@ -187,7 +186,7 @@ def run_pipeline(
     video_reports: list[dict[str, object]] = []
     all_events: list[dict[str, object]] = []
     with MouthEventAnalyzer() as mouth_analyzer:
-        processor = PilotVideoProcessor(
+        processor = VideoProcessor(
             settings=settings,
             transcriber=transcriber,
             aligner=aligner,

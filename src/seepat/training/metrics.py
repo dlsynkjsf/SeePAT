@@ -84,8 +84,7 @@ def choose_balanced_accuracy_threshold(
         for label in grouped[probability]:
             true_positives += label == 1
             false_positives += label == 0
-        # Integer comparison avoids floating-point tie drift. Descending scan
-        # plus >= implements the documented lowest-threshold tie break.
+        # Integer scores keep ties exact; scanning downward lets the lowest cutoff win.
         score = true_positives * negatives + (negatives - false_positives) * positives
         if score >= best_score:
             best_score = score

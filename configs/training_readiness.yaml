@@ -1,6 +1,4 @@
-# First experiment: frozen pretrained encoders; train the heads, TempCNN and fusion.
-# Niko launches these jobs. Hardware readiness is not established by this file.
-# Run epoch 1, then change the shared epochs value to 2 and rerun to test resume.
+# Run one epoch, then set epochs to two to check checkpoint resume.
 report: outputs/workflow_training_readiness_summary.json
 model_training:
   - name: readiness-swin

@@ -3,4 +3,5 @@
 *.yaml text eol=lf
 *.yml text eol=lf
 *.md text eol=lf
+/configs/sequence_evidence_pilot_v2.json text eol=lf
 

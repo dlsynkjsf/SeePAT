@@ -1,0 +1,2 @@
+# Official public CUDA-12 feed, CPython 3.12 Linux x86_64 wheel; metadata checked 1 Nov 2026.
+onnxruntime-gpu==1.18.0 --hash=sha256:546fbf2dcb7a2830ca69bde0c38665a88a9454e923ebb76bedf85eaed33a6f4a

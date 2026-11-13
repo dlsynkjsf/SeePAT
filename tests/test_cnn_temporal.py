@@ -1,24 +1,14 @@
 from __future__ import annotations
 
 import pytest
+from model_fixtures import TinyFrameBackbone
 
 torch = pytest.importorskip("torch")
 model_module = pytest.importorskip("seepat.models.cnn_temporal")
 nn = torch.nn
 EfficientNetTempCNNEventClassifier = model_module.EfficientNetTempCNNEventClassifier
 TemporalConvEncoder = model_module.TemporalConvEncoder
-parameter_counts = model_module.parameter_counts
-
-
-class TinyFrameBackbone(nn.Module):
-    def __init__(self) -> None:
-        super().__init__()
-        self.projection = nn.Linear(3, 6)
-        self.classifier = nn.Sequential(nn.Dropout(0.1), nn.Linear(6, 10))
-
-    def forward(self, frames: torch.Tensor) -> torch.Tensor:
-        pooled = frames.mean(dim=(2, 3))
-        return self.classifier(self.projection(pooled))
+from seepat.models import parameter_counts
 
 
 def _tiny_model(freeze_backbone: bool = False) -> EfficientNetTempCNNEventClassifier:

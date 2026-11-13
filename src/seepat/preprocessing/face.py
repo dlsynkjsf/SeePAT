@@ -102,6 +102,19 @@ def normalized_vild(
     return _distance(upper_lip, lower_lip) / mouth_width
 
 
+def mouth_crop_bounds(
+    points: dict[int, tuple[float, float]], width: int, height: int,
+) -> tuple[int, int, int, int]:
+    """Bound the same padded lip square for event and context clips."""
+    xs, ys = zip(*points.values(), strict=True)
+    center_x, center_y = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+    side = max(24.0, 1.8 * max(max(xs) - min(xs), max(ys) - min(ys)))
+    return (
+        max(0, int(center_x - side / 2)), max(0, int(center_y - side / 2)),
+        min(width, int(center_x + side / 2)), min(height, int(center_y + side / 2)),
+    )
+
+
 class MouthEventAnalyzer:
     def __init__(self, min_detection_confidence: float = 0.5) -> None:
         try:
@@ -338,16 +351,7 @@ class MouthEventAnalyzer:
                 measurements.append((timestamp_s, vild))
                 valid_frames += 1
 
-                x_values = [point[0] for point in points.values()]
-                y_values = [point[1] for point in points.values()]
-                center_x = (min(x_values) + max(x_values)) / 2
-                center_y = (min(y_values) + max(y_values)) / 2
-                side = max(max(x_values) - min(x_values), max(y_values) - min(y_values)) * 1.8
-                side = max(side, 24.0)
-                x1 = max(0, int(center_x - side / 2))
-                y1 = max(0, int(center_y - side / 2))
-                x2 = min(width, int(center_x + side / 2))
-                y2 = min(height, int(center_y + side / 2))
+                x1, y1, x2, y2 = mouth_crop_bounds(points, width, height)
                 crop = frame[y1:y2, x1:x2]
                 if crop.size:
                     mouth_writer.write(cv2.resize(crop, (112, 112)))

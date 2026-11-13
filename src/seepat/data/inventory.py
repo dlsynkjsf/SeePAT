@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterator, Sequence
-from hashlib import sha256
 from pathlib import Path
 
 import ijson
+
+from seepat.artifacts import file_sha256
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS videos (
@@ -32,18 +33,9 @@ ON videos(original);
 """
 
 
-def file_sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
-    digest = sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(chunk_size):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def iter_metadata(path: Path) -> Iterator[dict[str, object]]:
     with path.open("rb") as stream:
-        # AV++ segment timestamps are ordinary floats. Parsing them as floats
-        # keeps streamed values JSON-serializable without loading the array.
+        # Stream timestamps as floats so each record can be written back to JSON.
         yield from ijson.items(stream, "item", use_float=True)
 
 

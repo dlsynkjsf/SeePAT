@@ -1,0 +1,13 @@
+{
+  "version": "seepat-local-ui-v1",
+  "freeze": "configs/model.json",
+  "device": "cuda",
+  "output_dir": "outputs/local_demo",
+  "max_video_mb": 200,
+  "examples": [
+    {"id": "example-1", "title": "Saved sample 01", "request": "configs/local_inference_case_01.json", "output_dir": "outputs/local_inference/phase2_acceptance_20261031_v2/case_01"},
+    {"id": "example-2", "title": "Saved sample 02", "request": "configs/local_inference_case_02.json", "output_dir": "outputs/local_inference/phase2_acceptance_20261031_v2/case_02"},
+    {"id": "example-3", "title": "Saved sample 03", "request": "configs/local_inference_case_03.json", "output_dir": "outputs/local_inference/phase2_acceptance_20261031_v2/case_03"},
+    {"id": "example-4", "title": "Saved sample 04", "request": "configs/local_inference_case_04.json", "output_dir": "outputs/local_inference/phase2_acceptance_20261031_v2/case_04"}
+  ]
+}

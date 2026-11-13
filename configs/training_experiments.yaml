@@ -1,6 +1,4 @@
-# First experiment: frozen pretrained encoders; train the heads, TempCNN and fusion.
-# Niko launches these jobs. Hardware readiness is not established by this file.
-# Full runs require the matching resumed readiness checks to pass first.
+# Full training runs use the completed readiness checks.
 report: outputs/workflow_experiments_summary.json
 model_training:
   - name: experiment-swin

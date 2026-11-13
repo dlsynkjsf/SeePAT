@@ -1,0 +1,26 @@
+report: outputs/local_inference/workflow.json
+local_inference:
+- name: example-01
+  freeze: configs/model.json
+  raw_inputs: configs/local_inference_case_01.json
+  output_dir: outputs/local_inference/examples/case_01
+  device: cuda
+  batch_size: 1
+- name: example-02
+  freeze: configs/model.json
+  raw_inputs: configs/local_inference_case_02.json
+  output_dir: outputs/local_inference/examples/case_02
+  device: cuda
+  batch_size: 1
+- name: example-03
+  freeze: configs/model.json
+  raw_inputs: configs/local_inference_case_03.json
+  output_dir: outputs/local_inference/examples/case_03
+  device: cuda
+  batch_size: 1
+- name: example-04
+  freeze: configs/model.json
+  raw_inputs: configs/local_inference_case_04.json
+  output_dir: outputs/local_inference/examples/case_04
+  device: cuda
+  batch_size: 1

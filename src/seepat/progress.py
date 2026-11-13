@@ -27,7 +27,7 @@ def summarize_progress(
         result_path = cache_dir / stable_id(row["file"]) / "result.json"
         try:
             cached = json.loads(result_path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError):
             continue
         if cached.get("cache_signature") != cache_signature:
             continue
@@ -90,7 +90,7 @@ def format_progress(progress: dict[str, object]) -> str:
 def _read_run_record(path: Path) -> dict[str, object]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError):
         return {}
     return value if isinstance(value, dict) else {}
 
@@ -98,7 +98,7 @@ def _read_run_record(path: Path) -> dict[str, object]:
 def _completed_history_epochs(path: Path) -> int:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError):
         return 0
     if not isinstance(value, list):
         return 0
@@ -254,6 +254,17 @@ def read_workflow_progress(config_path: Path) -> dict[str, object]:
             "videos_requested": record.get("videos_requested", 0),
             "manifest": record.get("manifest", ""),
         })
+    from seepat.coverage import coverage_outputs_are_current
+
+    coverage_pilots = []
+    for job in getattr(settings, "coverage_pilot_jobs", ()):
+        current = coverage_outputs_are_current(job)
+        current_stages += int(current)
+        record = _read_run_record(job.output_dir / "summary.json")
+        coverage_pilots.append({
+            "name": job.name, "status": "current" if current else "pending_or_stale",
+            "gate": record.get("gate", {}),
+        })
     from seepat.decision import decision_stage_status
 
     decisions = [{"name": job.name, "stages": decision_stage_status(job)} for job in settings.decision_jobs]
@@ -266,8 +277,16 @@ def read_workflow_progress(config_path: Path) -> dict[str, object]:
         current_stages += int(current)
         study = {"name": settings.study_job.name, "phase": settings.study_job.phase,
                  "status": "current" if current else "pending_or_stale"}
+    local_inference = []
+    for job in getattr(settings, "local_inference_jobs", ()):
+        from seepat.workflow import _local_inference_api
+
+        status = _local_inference_api().local_job_status(job)
+        local_inference.append(status)
+        current_stages += sum(value == "current" for value in status["stages"].values())
     total_stages = (2 * len(settings.jobs) + len(settings.model_training_jobs)
-                    + len(evidence_stages) + 3 * len(decisions) + int(study is not None))
+                    + len(evidence_stages) + 3 * len(decisions) + int(study is not None)
+                    + len(coverage_pilots) + 3 * len(local_inference))
     return {
         "workflow_config": config_path.as_posix(),
         "stages_current": current_stages,
@@ -278,6 +297,8 @@ def read_workflow_progress(config_path: Path) -> dict[str, object]:
         "evidence_stages": evidence_stages,
         "decisions": decisions,
         "ablation_study": study,
+        **({"coverage_pilots": coverage_pilots} if coverage_pilots else {}),
+        **({"local_inference": local_inference} if local_inference else {}),
     }
 
 
@@ -350,9 +371,13 @@ def main() -> None:
             formatted = format_progress(progress)
         if args.watch_seconds is None:
             print(json.dumps(progress, indent=2))
+            if args.verify and not finished:
+                raise SystemExit(1)
             return
         print(formatted, flush=True)
         if finished:
+            if progress.get("status") in {"failed", "interrupted"}:
+                raise SystemExit(1)
             return
         try:
             sleep(args.watch_seconds)

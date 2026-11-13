@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import importlib.util
 import json
 import os
@@ -15,6 +14,7 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from seepat.artifacts import atomic_write_json
+from seepat.artifacts import file_sha256 as _sha256
 from seepat.config import AudioEnhancementSettings
 from seepat.preprocessing.media import extract_mono_audio, find_media_binary
 
@@ -78,14 +78,6 @@ class DeepFilterResult:
     cache_hit: bool
     fallback_applied: bool
     max_sustained_attenuation_s: float | None
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def _installed_version(package: str) -> str:
@@ -185,7 +177,7 @@ def _stage_is_current(output_path: Path, metadata_path: Path, contract: dict[str
         return False
     try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError):
         return False
     return metadata.get("contract") == contract
 
@@ -216,7 +208,7 @@ def _publish_stage_output(
 def _read_stage_outcome(metadata_path: Path) -> dict[str, object]:
     try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError):
         return {}
     outcome = metadata.get("outcome", {})
     return outcome if isinstance(outcome, dict) else {}

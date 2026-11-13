@@ -20,12 +20,26 @@ def audit_inputs(job: ModelTrainingJob) -> dict[str, object]:
     from seepat.evidence import calibrated_manifest_contract
     from seepat.training.dataset import MouthEventDataset
     from seepat.training.train import FUSION_MODEL, TrainingOptions, source_group_overlap
+    from seepat.training.video_objective import VIDEO_MAX, video_bags
 
     options = TrainingOptions(**job.options)
     options.validate()
-    inputs, summaries, contracts = {}, {}, []
+    if options.supervision == VIDEO_MAX and job.model != FUSION_MODEL:
+        raise ValueError("Production video_max supervision is supported only by full fusion")
+    inputs, summaries, contracts, clip_contracts = {}, {}, [], []
     for split, path in (("train", job.train_manifest), ("val", job.validation_manifest)):
         rows = read_csv_rows(path)
+        matched_dataset = None
+        if job.input_profile is not None:
+            from seepat.training.matched_inputs import MatchedClipDataset
+
+            if job.model != FUSION_MODEL or options.supervision != VIDEO_MAX:
+                raise ValueError("Matched input audit requires fusion/video supervision")
+            matched_dataset = MatchedClipDataset(path, job.project_root, split, job.input_profile,
+                                                 options.sequence_length, options.image_size)
+            matched_dataset.audit_clips()
+            clip_contracts.append(matched_dataset.input_contract)
+            rows = matched_dataset.rows
         if not rows or any(
             row.get("dataset_split") != split
             or row.get("dataset_source", "AV-Deepfake1M++") != "AV-Deepfake1M++"
@@ -35,19 +49,27 @@ def audit_inputs(job: ModelTrainingJob) -> dict[str, object]:
         ids = [row.get("event_id") for row in rows]
         if not all(ids) or len(ids) != len(set(ids)):
             raise ValueError(f"{split} event IDs must be nonempty and unique")
-        if {row["class_id"] for row in rows} != {"0", "1"}:
+        bags = video_bags(rows, job.input_profile is not None) if options.supervision == VIDEO_MAX else None
+        if bags is not None and {bag.label for bag in bags} != {0, 1}:
+            raise ValueError(f"{split} must contain both binary video classes")
+        if bags is None and {row["class_id"] for row in rows} != {"0", "1"}:
             raise ValueError(f"{split} must contain both binary event classes")
-        dataset = MouthEventDataset(path, job.project_root, dataset_split=split)
+        dataset = matched_dataset or MouthEventDataset(path, job.project_root, dataset_split=split)
         missing = [row["mouth_clip_path"] for row in rows
                    if not (job.project_root / row["mouth_clip_path"].replace("\\", "/")).is_file()]
         if missing:
             raise ValueError(f"{split} has {len(missing)} missing mouth clips; first: {missing[0]}")
         if job.model == FUSION_MODEL:
-            contracts.append(calibrated_manifest_contract(path, rows))
+            contracts.append(dataset.calibration_contract if matched_dataset else calibrated_manifest_contract(path, rows))
         inputs[split] = rows
         summaries[split] = {
             "events": len(dataset), "class_counts": dict(Counter(row["class_id"] for row in rows)),
             "source_groups": len({row["source_group"] for row in rows}),
+            **({"clip_kind_counts": dict(Counter(row["kind"] for row in rows)),
+                "event_target_minus_one": "unavailable context annotation, not a class"}
+               if matched_dataset is not None else {}),
+            **({"videos": len(bags), "video_class_counts": dict(Counter(str(bag.label) for bag in bags)),
+                "supervision": VIDEO_MAX} if bags is not None else {}),
         }
     if source_group_overlap(inputs["train"], inputs["val"]):
         raise ValueError("Train and Validation source groups overlap")
@@ -55,6 +77,10 @@ def audit_inputs(job: ModelTrainingJob) -> dict[str, object]:
         raise ValueError("Train and Validation event IDs overlap")
     if contracts and contracts[0] != contracts[1]:
         raise ValueError("Fusion inputs must share one frozen Train calibration")
+    if clip_contracts and clip_contracts[0] != clip_contracts[1]:
+        raise ValueError("Matched Train/Validation must use the same arm and pinned export")
+    if job.input_profile is not None and job.initialize_from is None:
+        raise ValueError("Matched training requires the pinned Phase-3 warm start")
     initial_checkpoint = None
     if job.initialize_from is not None:
         if not job.initialize_from.is_file():
@@ -63,6 +89,8 @@ def audit_inputs(job: ModelTrainingJob) -> dict[str, object]:
             "path": job.initialize_from.as_posix(),
             "sha256": file_sha256(job.initialize_from),
         }
+        if job.input_profile is not None and initial_checkpoint["sha256"] != job.input_profile["initial_checkpoint_sha256"]:
+            raise ValueError("Matched initial checkpoint hash differs from the pinned reference")
     return {
         "name": job.name,
         "status": "passed",
@@ -91,6 +119,7 @@ def check_readiness(job: ModelTrainingJob) -> dict[str, object]:
     import torch
 
     from seepat.training.train import VIDEO_BALANCED_ACCURACY_SELECTION, TrainingOptions
+    from seepat.training.video_objective import VIDEO_MAX, select_video_bags, video_bags
     from seepat.workflow import _model_training_configuration_matches
 
     directory = job.readiness_dir or job.output_dir
@@ -128,9 +157,40 @@ def check_readiness(job: ModelTrainingJob) -> dict[str, object]:
         for epoch in history:
             for split in ("train", "validation"):
                 counts = epoch[split]["events"]
-                if (counts["true_positive"] + counts["false_negative"] == 0
+                if options.supervision != VIDEO_MAX and (counts["true_positive"] + counts["false_negative"] == 0
                         or counts["true_negative"] + counts["false_positive"] == 0):
                     raise ValueError("Readiness must exercise both event classes in each split and epoch")
+                if options.supervision == VIDEO_MAX:
+                    is_train = split == "train"
+                    path = job.train_manifest if is_train else job.validation_manifest
+                    rows = read_csv_rows(path)
+                    if job.input_profile is not None:
+                        from seepat.training.matched_inputs import MatchedClipDataset
+
+                        rows = MatchedClipDataset(path, job.project_root, "train" if is_train else "val",
+                                                  job.input_profile, options.sequence_length, options.image_size).rows
+                    plan = select_video_bags(
+                        video_bags(rows, job.input_profile is not None), options.seed + epoch["epoch"] if is_train else options.seed,
+                        is_train, options.max_train_batches if is_train else options.max_validation_batches,
+                    )
+                    expected_bags = [{"video_id": bag.video_id, "label": bag.label,
+                                      "events": len(bag.indices)} for bag in plan]
+                    section = epoch[split]
+                    if (section.get("complete_video_bags") is not True
+                            or section.get("loss_unit") != "video"
+                            or section.get("video_bags") != expected_bags
+                            or section.get("videos_processed") != len(plan)
+                            or section.get("batches") != len(plan)
+                            or section.get("events_processed") != sum(len(bag.indices) for bag in plan)
+                            or section.get("videos", {}).get("samples") != len(plan)):
+                        raise ValueError("Video readiness must exercise verified complete bags, not partial events")
+                    video_counts = section["videos"]
+                    if (job.input_profile is not None and path.name.startswith("candidate_")
+                            and section.get("context_clips_processed", 0) < 1):
+                        raise ValueError("Candidate readiness must actually exercise context clips in both splits")
+                    if (video_counts["true_positive"] + video_counts["false_negative"] == 0
+                            or video_counts["true_negative"] + video_counts["false_positive"] == 0):
+                        raise ValueError("Video readiness must exercise both video classes in every split")
             if options.selection_metric == VIDEO_BALANCED_ACCURACY_SELECTION:
                 selection = epoch["validation"].get("selection", {})
                 if (
@@ -166,8 +226,12 @@ def check_readiness(job: ModelTrainingJob) -> dict[str, object]:
             weights_only=False,
             mmap=True,
         )
-        if selected.get("selection_metric") != options.selection_metric:
-            raise ValueError("Readiness selected checkpoint uses the wrong metric")
+        if (selected.get("checkpoint_type") != "seepat_evaluation_model"
+                or selected.get("selection_metric") != options.selection_metric
+                or selected.get("resume_contract") != run["resume_contract"]
+                or selected.get("completed_epoch") != run.get("best_epoch")
+                or not selected.get("model_state") or not _finite(selected["model_state"])):
+            raise ValueError("Readiness selected checkpoint has invalid metric, provenance or model state")
         result.update(status="passed", optimizer_updates=updates, epochs=len(history),
                       environment=run["environment"], peak_cuda_memory_bytes=run["peak_cuda_memory_bytes"],
                       last_invocation_seconds=run["elapsed_seconds"],

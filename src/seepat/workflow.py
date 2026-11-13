@@ -4,326 +4,33 @@ import argparse
 import hashlib
 import json
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from seepat.artifacts import atomic_write_json, read_csv_rows, stable_id
+from seepat.artifacts import file_sha256 as _sha256
 from seepat.config import PipelineSettings, load_pipeline_settings
-from seepat.decision import DecisionJob, run_decision_job
+from seepat.coverage import run_coverage_pilot
+from seepat.decision import run_decision_job
 from seepat.live_progress import ProgressCallback, WorkflowProgress
 from seepat.pipeline import PIPELINE_VERSION, run_pipeline
-from seepat.preprocessing.augmentation import TraceAugmentationJob, run_trace_augmentation
+from seepat.preprocessing.augmentation import run_trace_augmentation
 from seepat.preprocessing.contract import audit_preprocessing_contract
 from seepat.training.manifest import prepare_training_manifests
-from seepat.training.study import StudyJob, run_study_job
+from seepat.training.study import run_study_job
+from seepat.workflow_config import (
+    SUPPORTED_TRAINING_MODELS,  # noqa: F401 -- public configuration API
+    ModelTrainingJob,
+    NumericalCalibrationJob,
+    WorkflowJob,
+    WorkflowSettings,  # noqa: F401 -- public configuration API
+    _local_inference_api,
+    _require_mapping,
+    load_workflow_settings,
+)
 
 WORKFLOW_VERSION = "local-pipeline-v2"
-SUPPORTED_TRAINING_MODELS = {
-    "swin3d_b",
-    "efficientnet_v2_s_tempcnn",
-    "swin3d_b_vild_fusion",
-    "efficientnet_v2_s_only",
-    "tempcnn_gray16",
-    "swin3d_b_visual_fusion",
-}
-
-
-@dataclass(frozen=True)
-class WorkflowJob:
-    name: str
-    pipeline_config: Path
-    manifest_output_dir: Path
-
-
-@dataclass(frozen=True)
-class ModelTrainingJob:
-    name: str
-    train_manifest: Path
-    validation_manifest: Path
-    output_dir: Path
-    project_root: Path
-    device: str
-    pretrained: bool
-    options: dict[str, object]
-    model: str = "swin3d_b"
-    readiness_dir: Path | None = None
-    initialize_from: Path | None = None
-
-
-@dataclass(frozen=True)
-class NumericalCalibrationJob:
-    name: str
-    train_manifest: Path | None
-    score_manifests: tuple[tuple[str, Path], ...]
-    output_dir: Path
-    min_video_reference_frames: int = 16
-    isolation_trees: int = 100
-    random_seed: int = 20260908
-    calibration: Path | None = None
-
-
-@dataclass(frozen=True)
-class WorkflowSettings:
-    jobs: tuple[WorkflowJob, ...]
-    model_training_jobs: tuple[ModelTrainingJob, ...]
-    report_path: Path
-    numerical_calibration_jobs: tuple[NumericalCalibrationJob, ...] = ()
-    trace_augmentation_jobs: tuple[TraceAugmentationJob, ...] = ()
-    decision_jobs: tuple[DecisionJob, ...] = ()
-    model_training_config: Path | None = None
-    study_job: StudyJob | None = None
-
-
-def _require_mapping(value: object, description: str) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise TypeError(f"{description} must be a YAML mapping")
-    return value
-
-
-def load_workflow_settings(path: Path) -> WorkflowSettings:
-    with path.open(encoding="utf-8") as stream:
-        raw = yaml.safe_load(stream)
-    config = _require_mapping(raw, "Workflow configuration")
-
-    raw_jobs = config.get("jobs", [])
-    if not isinstance(raw_jobs, list):
-        raise TypeError("Workflow jobs must be a list")
-
-    jobs: list[WorkflowJob] = []
-    names: set[str] = set()
-    for index, raw_job in enumerate(raw_jobs, start=1):
-        job = _require_mapping(raw_job, f"Workflow job {index}")
-        name = str(job.get("name", "")).strip()
-        if not name:
-            raise ValueError(f"Workflow job {index} has no name")
-        if name in names:
-            raise ValueError(f"Duplicate workflow job name: {name}")
-        names.add(name)
-        try:
-            pipeline_config = Path(str(job["pipeline_config"]))
-            manifest_output_dir = Path(str(job["manifest_output_dir"]))
-        except KeyError as error:
-            raise ValueError(
-                f"Workflow job {name!r} is missing {error.args[0]!r}"
-            ) from error
-        jobs.append(
-            WorkflowJob(
-                name=name,
-                pipeline_config=pipeline_config,
-                manifest_output_dir=manifest_output_dir,
-            )
-        )
-
-    training_config = None
-    training_source = config
-    if config.get("model_training_config") is not None:
-        training_config = path.parent / str(config["model_training_config"])
-        with training_config.open(encoding="utf-8") as stream:
-            training_source = _require_mapping(yaml.safe_load(stream), "Model training profile")
-        if training_source.get("model_training_config") is not None:
-            raise ValueError("Nested model training profiles are not supported")
-        if not (training_source.get("model_training") or training_source.get("ablation_study")):
-            raise ValueError("Model training profile must contain model_training jobs or an ablation_study")
-    raw_training = training_source.get("model_training")
-    if raw_training is None:
-        raw_training_jobs: list[object] = []
-    elif isinstance(raw_training, list):
-        raw_training_jobs = raw_training
-    else:
-        raw_training_jobs = [raw_training]
-
-    model_training_jobs: list[ModelTrainingJob] = []
-    model_names: set[str] = set()
-    model_output_dirs: set[Path] = set()
-    for index, raw_model_job in enumerate(raw_training_jobs, start=1):
-        training = _require_mapping(
-            raw_model_job,
-            f"Model training configuration {index}",
-        )
-        options = _require_mapping(training.get("options", {}), "Model training options")
-        pretrained = training.get("pretrained", True)
-        if not isinstance(pretrained, bool):
-            raise TypeError("Model training pretrained value must be true or false")
-        device = str(training.get("device", "auto"))
-        if device not in {"auto", "cpu", "cuda"}:
-            raise ValueError("Model training device must be auto, cpu, or cuda")
-        model = str(training.get("model", "swin3d_b")).strip()
-        if model not in SUPPORTED_TRAINING_MODELS:
-            raise ValueError(f"Unsupported model training model: {model!r}")
-        try:
-            model_training = ModelTrainingJob(
-                name=str(training.get("name", "model-training")).strip(),
-                train_manifest=Path(str(training["train_manifest"])),
-                validation_manifest=Path(str(training["validation_manifest"])),
-                output_dir=Path(str(training["output_dir"])),
-                project_root=Path(str(training.get("project_root", "."))),
-                device=device,
-                pretrained=pretrained,
-                options={str(key): value for key, value in options.items()},
-                model=model,
-                readiness_dir=Path(training["readiness_dir"]) if training.get("readiness_dir") else None,
-                initialize_from=(
-                    Path(training["initialize_from"])
-                    if training.get("initialize_from")
-                    else None
-                ),
-            )
-        except KeyError as error:
-            raise ValueError(
-                f"Model training configuration is missing {error.args[0]!r}"
-            ) from error
-        if not model_training.name:
-            raise ValueError("Model training configuration has no name")
-        if model_training.readiness_dir is not None and (
-            model_training.readiness_dir.resolve() == model_training.output_dir.resolve()
-            or options.get("max_train_batches") is not None
-        ):
-            raise ValueError("Experiment readiness must use a separate output and an uncapped training job")
-        if model_training.name in model_names:
-            raise ValueError(f"Duplicate model training job name: {model_training.name}")
-        if model_training.output_dir in model_output_dirs:
-            raise ValueError(
-                f"Duplicate model training output directory: {model_training.output_dir}"
-            )
-        model_names.add(model_training.name)
-        model_output_dirs.add(model_training.output_dir)
-        model_training_jobs.append(model_training)
-
-    raw_calibration = config.get("numerical_calibration")
-    if raw_calibration is None:
-        raw_calibration_jobs: list[object] = []
-    elif isinstance(raw_calibration, list):
-        raw_calibration_jobs = raw_calibration
-    else:
-        raw_calibration_jobs = [raw_calibration]
-    numerical_calibration_jobs: list[NumericalCalibrationJob] = []
-    calibration_names: set[str] = set()
-    calibration_output_dirs: set[Path] = set()
-    for index, raw_calibration_job in enumerate(raw_calibration_jobs, start=1):
-        calibration = _require_mapping(
-            raw_calibration_job, f"Numerical calibration configuration {index}"
-        )
-        raw_scoring = _require_mapping(
-            calibration.get("score_manifests", {}),
-            "Numerical calibration score_manifests",
-        )
-        score_manifests = tuple(
-            (str(name).strip(), Path(str(value)))
-            for name, value in sorted(
-                raw_scoring.items(), key=lambda item: str(item[0])
-            )
-        )
-        if not score_manifests or any(not name for name, _ in score_manifests):
-            raise ValueError("Numerical calibration requires named score_manifests")
-        if len({name for name, _ in score_manifests}) != len(score_manifests):
-            raise ValueError("Numerical calibration score_manifests names must be unique")
-        try:
-            calibration_job = NumericalCalibrationJob(
-                name=str(calibration.get("name", "numerical-calibration")).strip(),
-                train_manifest=(
-                    Path(str(calibration["train_manifest"]))
-                    if calibration.get("train_manifest")
-                    else None
-                ),
-                score_manifests=score_manifests,
-                output_dir=Path(str(calibration["output_dir"])),
-                min_video_reference_frames=int(
-                    calibration.get("min_video_reference_frames", 16)
-                ),
-                isolation_trees=int(calibration.get("isolation_trees", 100)),
-                random_seed=int(calibration.get("random_seed", 20260908)),
-                calibration=(
-                    Path(str(calibration["calibration"]))
-                    if calibration.get("calibration")
-                    else None
-                ),
-            )
-        except KeyError as error:
-            raise ValueError(
-                f"Numerical calibration configuration is missing {error.args[0]!r}"
-            ) from error
-        if not calibration_job.name:
-            raise ValueError("Numerical calibration configuration has no name")
-        if (calibration_job.train_manifest is None) == (calibration_job.calibration is None):
-            raise ValueError(
-                "Numerical calibration requires exactly one of train_manifest or calibration"
-            )
-        if calibration_job.name in calibration_names:
-            raise ValueError(
-                f"Duplicate numerical calibration job name: {calibration_job.name}"
-            )
-        if calibration_job.output_dir in calibration_output_dirs:
-            raise ValueError(
-                f"Duplicate numerical calibration output directory: {calibration_job.output_dir}"
-            )
-        calibration_names.add(calibration_job.name)
-        calibration_output_dirs.add(calibration_job.output_dir)
-        numerical_calibration_jobs.append(calibration_job)
-
-    augmentation_jobs = []
-    for raw_job in config.get("trace_augmentation", []):
-        job = _require_mapping(raw_job, "Trace augmentation job")
-        augmentation = TraceAugmentationJob(
-            name=str(job["name"]), manifest=Path(job["manifest"]),
-            extracted_root=Path(job["extracted_root"]), output_dir=Path(job["output_dir"]),
-            max_videos=job.get("max_videos"),
-            normalized_tolerance=float(job.get("normalized_tolerance", 1e-5)),
-            timestamp_tolerance_s=float(job.get("timestamp_tolerance_s", 1e-6)),
-        )
-        augmentation.validate()
-        if any(old.name == augmentation.name or old.output_dir == augmentation.output_dir
-               for old in augmentation_jobs):
-            raise ValueError("Duplicate trace augmentation name or output directory")
-        augmentation_jobs.append(augmentation)
-    decision_jobs = []
-    for raw_job in config.get("decisions", []):
-        item = _require_mapping(raw_job, "Validation decision job")
-        if item.get("split", "val") != "val" or item.get("dataset_source", "AV-Deepfake1M++") != "AV-Deepfake1M++":
-            raise ValueError("Decision workflow is restricted to AV++ Validation; external/test remains locked")
-        decision = DecisionJob(
-            name=str(item["name"]), validation_manifest=Path(item["validation_manifest"]),
-            output_dir=Path(item["output_dir"]),
-            checkpoint=Path(item["checkpoint"]) if item.get("checkpoint") else None,
-            source_manifest=Path(item["source_manifest"]) if item.get("source_manifest") else None,
-            project_root=Path(item.get("project_root", ".")), device=str(item.get("device", "auto")),
-            batch_size=int(item.get("batch_size", 1)),
-            threshold_artifact=(
-                Path(item["threshold_artifact"])
-                if item.get("threshold_artifact")
-                else None
-            ),
-        )
-        if not decision.name or decision.batch_size < 1 or any(
-            old.name == decision.name or old.output_dir == decision.output_dir for old in decision_jobs
-        ):
-            raise ValueError("Decision jobs require unique names/outputs and positive batch size")
-        decision_jobs.append(decision)
-    study_job = None
-    if training_source.get("ablation_study") is not None:
-        item = dict(_require_mapping(training_source["ablation_study"], "Ablation study"))
-        for key in ("train_manifest", "validation_manifest", "output_dir", "project_root"):
-            if key in item:
-                item[key] = Path(item[key])
-        if "models" in item:
-            item["models"] = tuple(item["models"])
-        study_job = StudyJob(**item)
-        study_job.validate()
-    if not (jobs or augmentation_jobs or numerical_calibration_jobs or model_training_jobs or decision_jobs or study_job):
-        raise ValueError("Workflow configuration must contain at least one job")
-    report_path = Path(str(config.get("report", "outputs/workflow_summary.json")))
-    return WorkflowSettings(
-        jobs=tuple(jobs),
-        model_training_jobs=tuple(model_training_jobs),
-        report_path=report_path,
-        numerical_calibration_jobs=tuple(numerical_calibration_jobs),
-        trace_augmentation_jobs=tuple(augmentation_jobs),
-        decision_jobs=tuple(decision_jobs),
-        model_training_config=training_config,
-        study_job=study_job,
-    )
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -331,14 +38,6 @@ def _read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise TypeError(f"Expected a JSON object in {path}")
     return value
-
-
-def _sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(chunk_size):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 def preprocessing_outputs_are_current(
@@ -406,7 +105,7 @@ def preprocessing_outputs_are_current(
             and int(row.get("bilabial_event_count", 0)) > 0
         }
         return expected_trace_ids == {row["video_id"] for row in trace_rows}
-    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+    except (OSError, KeyError, TypeError, ValueError):
         return False
 
 
@@ -456,7 +155,7 @@ def training_outputs_are_current(
 
         expected_split_path = output_dir / f"events_{settings.dataset.split}.csv"
         return expected_split_path.is_file()
-    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+    except (OSError, KeyError, TypeError, ValueError):
         return False
 
 
@@ -535,10 +234,20 @@ def run_workflow_job(
 
 
 def _model_training_options(job: ModelTrainingJob):
-    from seepat.training.train import TrainingOptions
+    from seepat.training.train import FUSION_MODEL, TrainingOptions
+    from seepat.training.video_objective import VIDEO_MAX
 
     options = TrainingOptions(**job.options)
     options.validate()
+    if options.supervision == VIDEO_MAX and job.model != FUSION_MODEL:
+        raise ValueError("Production video_max supervision is supported only by full fusion")
+    if job.input_profile is not None:
+        from seepat.training.matched_inputs import validate_profile
+
+        validate_profile(job.input_profile)
+        if (job.model != FUSION_MODEL or options.supervision != VIDEO_MAX
+                or options.sequence_length != 16 or options.unfreeze_final_backbone_stages):
+            raise ValueError("Matched inputs require frozen fusion/video_max and 16 slots")
     return options
 
 
@@ -553,6 +262,7 @@ def _model_training_configuration_matches(
         model_contract_name,
         training_version_for_model,
     )
+    from seepat.training.video_objective import VIDEO_MAX, VIDEO_SUPERVISION_CONTRACT
 
     try:
         options = _model_training_options(job)
@@ -572,6 +282,7 @@ def _model_training_configuration_matches(
         recorded_options.setdefault("backbone_learning_rate", None)
         recorded_options.setdefault("loss_function", "cross_entropy")
         recorded_options.setdefault("focal_gamma", 2.0)
+        recorded_options.setdefault("supervision", "event")
         recorded_options.pop("epochs", None)
         expected_options.pop("epochs")
         if job.device != "auto" and run_record.get("device") != job.device:
@@ -579,13 +290,30 @@ def _model_training_configuration_matches(
         if job.model == FUSION_MODEL:
             from seepat.evidence import calibrated_manifest_contract
 
-            train_contract = calibrated_manifest_contract(job.train_manifest)
-            val_contract = calibrated_manifest_contract(job.validation_manifest)
+            if job.input_profile is not None:
+                from seepat.training.matched_inputs import MatchedClipDataset
+
+                datasets = [MatchedClipDataset(path, job.project_root, split, job.input_profile,
+                                               options.sequence_length, options.image_size)
+                            for split, path in (("train", job.train_manifest), ("val", job.validation_manifest))]
+                train_contract, val_contract = [dataset.calibration_contract for dataset in datasets]
+                if (datasets[0].input_contract != datasets[1].input_contract
+                        or contract.get("clip_input_contract") != datasets[0].input_contract):
+                    return False
+            else:
+                train_contract = calibrated_manifest_contract(job.train_manifest)
+                val_contract = calibrated_manifest_contract(job.validation_manifest)
+                if contract.get("clip_input_contract") is not None:
+                    return False
             if train_contract != val_contract or contract.get("fusion_inputs") != train_contract:
                 return False
         return (
             run_record.get("run_type") == expected_type
             and recorded_options == expected_options
+            and contract.get("supervision") == (
+                VIDEO_SUPERVISION_CONTRACT if options.supervision == VIDEO_MAX else None
+            )
+            and (options.supervision != VIDEO_MAX or contract.get("seed") == options.seed)
             and contract.get("training_version") == training_version_for_model(job.model)
             and contract.get("model") == model_contract_name(job.model)
             and contract.get("model_name", SWIN_BASE_MODEL) == job.model
@@ -631,7 +359,7 @@ def model_training_outputs_are_current(job: ModelTrainingJob) -> bool:
             and completed_as_planned
             and _model_training_configuration_matches(job, run_record)
         )
-    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+    except (OSError, TypeError, ValueError):
         return False
 
 
@@ -654,6 +382,7 @@ def _run_model_training(
         resume_from=resume_from,
         initialize_from=job.initialize_from,
         progress=progress,
+        **({"input_profile": job.input_profile} if job.input_profile is not None else {}),
     )
 
 
@@ -768,11 +497,13 @@ def run_workflow(
     }
     tasks = (
         [("jobs", job) for job in settings.jobs]
+        + [("coverage_pilot", job) for job in settings.coverage_pilot_jobs]
         + [("trace_augmentation", job) for job in settings.trace_augmentation_jobs]
         + [("numerical_calibration", job) for job in settings.numerical_calibration_jobs]
         + [("model_training", job) for job in settings.model_training_jobs]
         + ([("ablation_study", settings.study_job)] if settings.study_job else [])
         + [("decisions", job) for job in settings.decision_jobs]
+        + [("local_inference", job) for job in settings.local_inference_jobs]
     )
     progress = WorkflowProgress(
         config_path, settings.report_path, len(tasks),
@@ -785,8 +516,12 @@ def run_workflow(
                 result = run_workflow_job(job, retry_failed=retry_failed, progress=progress)
             elif kind == "trace_augmentation":
                 result = run_trace_augmentation(job, progress=progress)
+            elif kind == "coverage_pilot":
+                result = run_coverage_pilot(job, progress=progress)
             elif kind == "numerical_calibration":
                 result = run_numerical_calibration_job(job, progress=progress)
+            elif kind == "local_inference":
+                result = _local_inference_api().run_local_job(job, progress=progress)
             elif kind == "decisions":
                 result = run_decision_job(job, progress=progress)
             elif kind == "ablation_study":
@@ -804,9 +539,35 @@ def run_workflow(
     return report
 
 
+def _local_readable_summary(row):
+    """Display sealed small reports only; upstream full verification is separate."""
+    from seepat.artifacts import file_sha256
+    from seepat.inference import readable_xai
+
+    viewer = Path(readable_xai.__file__)
+    viewer_bytes = viewer.read_bytes()
+    expected = row["summary"]["contract"]["implementation_sha256"]["readable_xai.py"]
+    if hashlib.sha256(viewer_bytes).hexdigest() != expected:
+        raise ValueError("Readable XAI source changed; review its release binding")
+    binding = row["summary"]["stage_summaries"]["explanation"]
+    summary = Path(binding["path"])
+    if summary.name != "summary.json" or file_sha256(summary) != binding["sha256"]:
+        raise ValueError("Explanation summary differs from completed workflow")
+    text = readable_xai.render_saved_report(summary.parent, technical=True, paragraph_layout=True)
+    if viewer.read_bytes() != viewer_bytes or file_sha256(summary) != binding["sha256"]:
+        raise ValueError("Presentation source changed during display")
+    return text
+
+
 def format_workflow_summary(report: dict[str, object], report_path: Path) -> str:
     """Compact terminal summary; JSON remains the authoritative report."""
     lines = ["", "#" * 72, "WORKFLOW COMPLETE"]
+    for row in report.get("coverage_pilot", []):
+        summary = row["summary"]
+        gain = summary["visual_coverage_gain"]
+        text = f"{gain:+.1%}" if gain is not None else "unavailable"
+        lines.append(f"  {row['name']} | {row['action']} | visual coverage gain {text}")
+        lines.append(f"  Next-step gate: {summary['gate']['decision']} (not a classifier result)")
     for row in report.get("model_training", []):
         summary = row.get("summary", {})
         metric = summary.get("selection_metric", "validation_video_f1")
@@ -824,6 +585,9 @@ def format_workflow_summary(report: dict[str, object], report_path: Path) -> str
         lines.append(
             f"  {row['name']:<34} {row['action']!s:<8} decisions {current}/3 complete"
         )
+    for row in report.get("local_inference", []):
+        lines.append(f"  {row['name']} | {row['action']} | local inference 3/3 complete")
+        lines.append(_local_readable_summary(row))
     lines.extend((f"Report: {report_path}", "#" * 72))
     return "\n".join(lines)
 

@@ -143,7 +143,6 @@ def augmented_trace_for_row(row: dict[str, str]) -> dict[str, object]:
     trace = trace_for_row(row)
     path_text = row.get("vild_augmentation_path", "")
     if not path_text:
-        # Legacy normalized-only manifests remain loadable; raw features stay missing.
         return trace
     path = Path(path_text)
     if (

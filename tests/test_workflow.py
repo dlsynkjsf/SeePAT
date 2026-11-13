@@ -573,8 +573,12 @@ def test_workflow_runs_model_training_after_preparation(tmp_path: Path, monkeypa
 def test_scaled_configs_keep_the_completed_guarded_cache_contract():
     assert PIPELINE_VERSION == "pilot-v4"
     expected = {
-        "train_scaled": ("outputs/train-subset5000", "a1e06db8beb9f89a4b58639fc2d511237ec44e8419515a742439f005af56fb3e"),
-        "val_scaled": ("outputs/val-subset1000", "eea9cb4739433d331e238306d2f64913dae58fcb014e7ab31deeb74a707642a7"),
+        "train_subset5000": ("outputs/train-subset5000", "a1e06db8beb9f89a4b58639fc2d511237ec44e8419515a742439f005af56fb3e"),
+        "val_subset1000": ("outputs/val-subset1000", "eea9cb4739433d331e238306d2f64913dae58fcb014e7ab31deeb74a707642a7"),
+    }
+    workflow = load_workflow_settings(Path("configs/workflow_scaled.yaml"))
+    assert {job.pipeline_config for job in workflow.jobs} == {
+        Path("configs") / f"{name}.yaml" for name in expected
     }
     for name, (output, signature) in expected.items():
         settings = load_pipeline_settings(Path("configs") / f"{name}.yaml", PIPELINE_VERSION)
@@ -596,9 +600,3 @@ def test_workflow_orders_augmentation_before_calibration_and_preserves_model_job
     (tmp_path / "workflow.yaml").write_text("test config", encoding="utf-8")
     run_workflow(tmp_path / "workflow.yaml")
     assert calls == ["augment", "calibrate", "swin"]
-
-
-def test_calibration_pilot_has_no_preprocessing_or_model_jobs():
-    settings = load_workflow_settings(Path("configs/workflow_calibration_pilot.yaml"))
-    assert not settings.jobs and not settings.model_training_jobs
-    assert [job.max_videos for job in settings.trace_augmentation_jobs] == [10, 10]

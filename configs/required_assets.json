@@ -1,0 +1,73 @@
+{
+  "scope": "Runtime assets required by SeePAT.",
+  "local_model": {
+    "checkpoint": {
+      "path": "outputs/training/fusion_phase2_v1/experiments/focal/checkpoint_best.pt",
+      "sha256": "5ebe81c0d5d9feaff3e7dcec2bcee503630d077675ae208ad50693c369829888"
+    },
+    "run": {
+      "path": "outputs/training/fusion_phase2_v1/experiments/focal/run.json",
+      "sha256": "cfaaad6e3aa4f0ba8905724a84b3f3a073297af48963666bcafb6b95705d83af"
+    },
+    "threshold": {
+      "path": "outputs/decisions/fusion_phase2_v1/inner/focal/threshold.json",
+      "sha256": "e845050ddf5b90846504dab4fdc3dd75d661815f917c564465feaf45fd8dbf91"
+    },
+    "calibration": {
+      "path": "outputs/numerical_calibration/guarded_per_video_v3/calibration.json",
+      "sha256": "d986fcf12747ba798c68664a76b45dd956f71cefc0a9a962072627acf73d9b39"
+    },
+    "preprocessing": {
+      "path": "configs/preprocessing.yaml",
+      "sha256": "a81906a68c82e1a9a5f44f0d314d759e5c0f1745dec431dc33670b9876e44daf"
+    }
+  },
+  "local_examples": [
+    {
+      "path": "data/extracted/avpp/val-subset1000/val/vox_celeb_2/id01450/5Wb_vaf4_7U/00017/real_p1.mp4",
+      "sha256": "66de903a1aa3a688da74e089e637dbedce5026fd8ee9ea2999cd7af01fb830ba"
+    },
+    {
+      "path": "data/extracted/avpp/val-subset1000/val/vox_celeb_2/id03298/_px-OC3Bcao/00341/real_video_fake_audio_p1.mp4",
+      "sha256": "fe1f59004b6550d545d58e0e35d34c44853b675ff448c48067738d48146a66bf"
+    },
+    {
+      "path": "data/extracted/avpp/val-subset1000/val/vox_celeb_2/id08064/ocJN84dFRnI/00481/fake_video_real_audio_p1.mp4",
+      "sha256": "ed1772dfcd677087edcccbe0b2bafda33c3eff338832eb2e3494f1b746746792"
+    },
+    {
+      "path": "data/extracted/avpp/val-subset1000/val/vox_celeb_2/id05283/t2f-tVS9SF4/00187/fake_video_fake_audio.mp4",
+      "sha256": "579609c554cdb99048b61235d839657d6da8a2979520a1ac73bffc21f0d7fb7f"
+    }
+  ],
+  "pia": {
+    "checkpoint": {
+      "path": ".tools/pia_feasibility_v1/source/checkpoints/best_model.pth",
+      "sha256": "188e1c7f1a252b88a1971ed7706e76d2a76cb3955f0b905a4af01d1c39da1d09"
+    },
+    "setup": {
+      "path": "outputs/pia_feasibility_v1/setup.json",
+      "sha256": "0a4ea126f4b903212dae3400ffe68328615dfe76820727e69bc1d6ee5116aaf8"
+    },
+    "metadata": {
+      "path": "data/raw/deepfake_eval_2024_locked/video-metadata-publish-with-links.csv",
+      "sha256": "0751b23143bd5b5187caf1c5722c15a7fd9e51c6bc7c09ef74521498e7ef0bc1"
+    },
+    "parity_proof": {
+      "path": "outputs/pia_external_cpu_100_v4/consumed_identity_parity_v1/proof.json",
+      "sha256": "008ac216c9d462d9a73f1fc16e8b7817ef86c80cb4c4b87a36e3a4947c292d62"
+    },
+    "reuse": {
+      "output": "outputs/pia_external_cpu_100_v4",
+      "config_sha256": "fb283fd0ebab650701672c75f460d3e76af8d755b947c089fbfbf6d1204e554d"
+    },
+    "image": "sha256:746771aa4d2f5ff6305b5531784c10ee577f57977672e05136beeb19acff2cb7"
+  },
+  "environment": {
+    "torch": "2.12.1+cu132",
+    "faster-whisper": "1.2.1",
+    "mediapipe": "0.10.21",
+    "opencv-contrib-python": "4.11.0.86",
+    "scikit-learn": "1.9.1"
+  }
+}

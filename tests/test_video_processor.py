@@ -9,7 +9,13 @@ from seepat.artifacts import read_gzip_json
 from seepat.config import AudioEnhancementSettings
 from seepat.preprocessing.alignment import MfaAlignmentError
 from seepat.preprocessing.audio import PreparedAudio
-from seepat.video_processor import PilotVideoProcessor
+from seepat.preprocessing.processor import VideoProcessor
+
+
+def test_historical_processor_name_is_a_compatibility_alias():
+    from seepat.video_processor import PilotVideoProcessor
+
+    assert PilotVideoProcessor is VideoProcessor
 
 
 def _disabled_audio_settings(tmp_path: Path) -> AudioEnhancementSettings:
@@ -53,7 +59,7 @@ def test_mfa_failure_is_reported_as_alignment_failed(
         raise MfaAlignmentError("Could not align with the current beam size")
 
     aligner = SimpleNamespace(align=fail_alignment)
-    processor = PilotVideoProcessor(
+    processor = VideoProcessor(
         settings=settings,
         transcriber=transcriber,
         aligner=aligner,
@@ -61,7 +67,7 @@ def test_mfa_failure_is_reported_as_alignment_failed(
     )
 
     monkeypatch.setattr(
-        "seepat.video_processor.probe_media",
+        "seepat.preprocessing.processor.probe_media",
         lambda path, ffprobe_path: {"audio_present": True, "fps": 25.0},
     )
 
@@ -69,7 +75,7 @@ def test_mfa_failure_is_reported_as_alignment_failed(
         output_path.write_bytes(b"audio")
         return output_path
 
-    monkeypatch.setattr("seepat.video_processor.extract_mono_audio", fake_extract)
+    monkeypatch.setattr("seepat.preprocessing.processor.extract_mono_audio", fake_extract)
 
     report, events = processor.process(
         manifest_row={"file": "video.mp4", "split": "train"},
@@ -114,7 +120,7 @@ def test_enhanced_audio_is_used_for_both_whisper_and_mfa(
         alignment_force.append(kwargs["force"])
         raise MfaAlignmentError("stop after input check")
 
-    processor = PilotVideoProcessor(
+    processor = VideoProcessor(
         settings=settings,
         transcriber=SimpleNamespace(transcribe=transcribe),
         aligner=SimpleNamespace(align=align),
@@ -126,7 +132,7 @@ def test_enhanced_audio_is_used_for_both_whisper_and_mfa(
         '{"text": "stale transcript"}', encoding="utf-8"
     )
     monkeypatch.setattr(
-        "seepat.video_processor.probe_media",
+        "seepat.preprocessing.processor.probe_media",
         lambda path, ffprobe_path: {"audio_present": True, "fps": 25.0},
     )
 
@@ -134,9 +140,9 @@ def test_enhanced_audio_is_used_for_both_whisper_and_mfa(
         output_path.write_bytes(b"raw")
         return output_path
 
-    monkeypatch.setattr("seepat.video_processor.extract_mono_audio", fake_extract)
+    monkeypatch.setattr("seepat.preprocessing.processor.extract_mono_audio", fake_extract)
     monkeypatch.setattr(
-        "seepat.video_processor.prepare_alignment_audio",
+        "seepat.preprocessing.processor.prepare_alignment_audio",
         lambda **kwargs: PreparedAudio(
             raw_audio=work_dir / "audio.wav",
             vocals_audio=work_dir / "demucs_vocals.wav",
@@ -170,7 +176,7 @@ def test_vild_trace_preserves_frames_references_and_no_labels(tmp_path: Path) ->
             speech_margin_seconds=0.02,
         ),
     )
-    processor = PilotVideoProcessor(
+    processor = VideoProcessor(
         settings=SimpleNamespace(preprocessing=preprocessing),
         transcriber=object(),
         aligner=object(),
@@ -272,7 +278,7 @@ def test_event_video_timing_applies_recorded_stream_offset(tmp_path: Path) -> No
             "minimum_overlay_path": None,
         }
 
-    processor = PilotVideoProcessor(
+    processor = VideoProcessor(
         settings=SimpleNamespace(
             preprocessing=SimpleNamespace(
                 output_dir=tmp_path,
