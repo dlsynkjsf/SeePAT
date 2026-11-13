@@ -1,6 +1,6 @@
 {
   "version": "seepat-local-ui-v1",
-  "freeze": "configs/local_inference_contract.submission.json",
+  "freeze": "configs/model.json",
   "device": "cuda",
   "output_dir": "outputs/local_demo",
   "max_video_mb": 200,

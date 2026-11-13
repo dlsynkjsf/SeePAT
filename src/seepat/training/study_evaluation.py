@@ -52,7 +52,6 @@ def evaluate_model(job, fold: dict, training, progress=None) -> dict:
         raise ValueError("Complete the matching fold experiment before evaluation")
     run = _read(training.output_dir / "run.json")
     checkpoint = Path(run["best_checkpoint"])
-    # This preserves the production Validation-only threshold gate.
     contract, provenance = evaluation_inputs(training.validation_manifest, checkpoint, "val")
     if contract.get("train_manifest_sha256") != file_sha256(training.train_manifest):
         raise ValueError("Selected checkpoint was not fitted on this fold's training subset")
@@ -150,8 +149,6 @@ def matched_geometry(rows: list[dict]) -> tuple[list[dict], dict]:
         missing["static"] += not static_ok
         missing["dynamic"] += not dynamic_ok
         if static_ok and dynamic_ok:
-            # Fixed monotone map permits the existing threshold/metric helpers.
-            # These are geometry/anomaly scores, NOT calibrated probabilities.
             paired.append({"event_id": row["event_id"], "video_id": row["video_id"],
                            "label": int(row["class_id"]),
                            "video_label": video_class_id(row["manipulation_modality"]),
@@ -223,7 +220,6 @@ def paired_statistics(first: list[float], second: list[float]) -> dict:
     nonzero = differences[differences != 0]
     if len(nonzero) > 15:
         raise ValueError("Exact signed-rank enumeration is bounded to 15 nonzero pairs")
-    # Exact sign enumeration also handles tied absolute differences and zero removal.
     ranks = stats.rankdata(np.abs(nonzero))
     observed = abs(float(np.sum(np.sign(nonzero) * ranks)))
     permutations = [abs(float(np.dot(signs, ranks))) for signs in product((-1, 1), repeat=len(nonzero))]

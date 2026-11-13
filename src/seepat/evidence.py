@@ -1,15 +1,4 @@
-"""Frozen contract for the biological-alignment evidence of SeePAT.
-
-The Audio-Visual Temporal Fusion block of Figure 4.1 combines the Video
-Swin-Base temporal features with the calibrated biological alignment:
-VILD normalization (correlation and regression), dynamic calibration
-(Isolation Forest) and phoneme-viseme mapping. This module defines the
-ordered evidence vector the fusion model consumes, the missing-data
-handling, and the human-readable labels used by the XAI forensic trace.
-
-Field order is part of the contract: changing it changes the model input
-width and invalidates trained fusion checkpoints.
-"""
+"""Ordered fusion measurements, availability masks, and report labels."""
 
 from __future__ import annotations
 
@@ -26,9 +15,7 @@ CLOSURE_OFFSET_DEFINITION = (
     "after aligned phoneme start; descriptive timing, not an anomaly probability"
 )
 
-#: Columns of the calibrated manifest consumed by the fusion model, in order.
-#: The first three are written by the numerical calibration stage; the rest are
-#: base bilabial-event measurements. ``closure_offset_s`` is derived below.
+# Keep this order: trained checkpoints expect each measurement in the same position.
 FUSION_EVIDENCE_FIELDS = (
     "vild_regression_residual_px",
     "phoneme_viseme_residual_z",
@@ -39,7 +26,6 @@ FUSION_EVIDENCE_FIELDS = (
     "closure_offset_s",
 )
 
-#: Fields computed from other columns instead of being read directly.
 DERIVED_EVIDENCE_FIELDS = ("closure_offset_s",)
 
 EVIDENCE_LABELS = {
@@ -53,7 +39,8 @@ EVIDENCE_LABELS = {
 }
 
 
-def _float_or_none(value: object) -> float | None:
+def finite_float(value: object) -> float | None:
+    """Read an optional measurement; missing, invalid, and infinite values stay missing."""
     try:
         number = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
@@ -62,17 +49,13 @@ def _float_or_none(value: object) -> float | None:
 
 
 def closure_offset_s(row: dict[str, str]) -> float | None:
-    """Time from the MFA bilabial anchor to the visual closure minimum.
+    """Seconds from the aligned video phoneme start to the visual closure minimum.
 
-    ``closure_time_s`` is on the video timeline; ``video_phone_start_s`` is the
-    MFA phoneme start shifted by the measured audio/video offset. Both are
-    required for the derived timing evidence to be considered available.
-    Positive values mean the visual minimum follows the phoneme start;
-    negative values mean it precedes it. This descriptor is not a supervised
-    synchronization error or an anomaly probability.
+    Both times use the video clock. Positive means the closure comes later;
+    this describes timing, not the probability of manipulation.
     """
-    closure_time = _float_or_none(row.get("closure_time_s", ""))
-    phone_start = _float_or_none(row.get("video_phone_start_s", ""))
+    closure_time = finite_float(row.get("closure_time_s", ""))
+    phone_start = finite_float(row.get("video_phone_start_s", ""))
     if closure_time is None or phone_start is None:
         return None
     return closure_time - phone_start
@@ -103,7 +86,7 @@ def calibrated_manifest_contract(
         if row["calibration_version"] != CALIBRATED_INPUT_VERSION:
             raise ValueError("Unsupported fusion calibration version")
         available = row["isolation_forest_available"].lower()
-        score = _float_or_none(row["isolation_forest_anomaly_score"])
+        score = finite_float(row["isolation_forest_anomaly_score"])
         if available not in {"true", "false"} or (available == "true") != (score is not None):
             raise ValueError("Calibrated anomaly score and availability disagree")
         if score is not None:
@@ -151,8 +134,9 @@ def evidence_feature_values(row: dict[str, str]) -> tuple[list[float], list[bool
         if field == "closure_offset_s":
             number = closure_offset_s(row)
         else:
-            number = _float_or_none(row.get(field, ""))
+            number = finite_float(row.get(field, ""))
         if number is None:
+            # The mask tells the model this zero is a placeholder, not a measurement.
             values.append(0.0)
             mask.append(False)
         else:

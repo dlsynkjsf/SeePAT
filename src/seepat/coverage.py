@@ -195,7 +195,6 @@ def _audit_video(source: dict, video: dict, events: list[dict]) -> tuple[dict, l
             "frame_mask_json": json.dumps(window["frame_mask"]),
         })
     row.update(context_windows=len(windows), status="audited", reason="")
-    # Annotations are read only after the annotation-free context plan is constructed.
     try:
         for kind, field in (("general", "fake_segments_json"),
                             ("audio", "audio_fake_segments_json"),

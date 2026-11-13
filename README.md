@@ -4,10 +4,8 @@ SeePAT detects audio-visual deepfakes using bilabial alignment, mouth-motion
 measurements, Video Swin, EfficientNet–TempCNN, and attention fusion. Its XAI
 Forensic Trace presents the saved verdict and supporting observations.
 
-This submission contains the maintained application, command interface,
-configuration templates, and focused tests. Historical experiment handoffs,
-recovery controllers, research snapshots, and old phase configurations are kept
-separately from the submission.
+The project includes the desktop application, command-line tools, configurations,
+and tests.
 
 ## Setup
 
@@ -28,7 +26,7 @@ Datasets, model weights, prepared evidence, cached models, and the virtual
 environment are supplied separately. Their required paths and saved hashes are
 listed in `configs/required_assets.json`. Populate these paths before running
 the corresponding operation. No trained weights or credentials are embedded in
-this source submission.
+the source package.
 
 ## Run the detector
 
@@ -52,7 +50,8 @@ cue, not proof that a word or mouth movement was altered.
 **Review at ...** plays the current video from its saved review timestamp inside
 the same window. Keep the selected original file available and unchanged.
 
-The UI uses the same frozen inference contract and existing runtime assets.
+The UI uses `configs/model.json` with the
+existing frozen model and runtime assets.
 It needs no web server or browser files. The `ui` extra supplies FFPyPlayer and
 Pillow for playback. On an existing installation, add it once with
 `.venv\Scripts\python.exe -m pip install -e ".[ui]"`. The Python launcher
@@ -69,7 +68,9 @@ python seepat.py run
 The default `configs/local_inference.yaml` prepares four known example
 recordings, scores them with the retained frozen fusion model and cutoff, and
 exports the forensic trace. It writes a fresh result tree under
-`outputs/local_inference/submission_examples_v2/`.
+`outputs/local_inference/examples/`.
+
+See [configs/README.md](configs/README.md) for the configuration files and their roles.
 
 For other local videos, create an input inventory and workflow configuration
 using the supplied examples. Each inventory records a source path, its SHA-256,
@@ -158,8 +159,8 @@ than imported by the application. The application tests remain alongside this co
 .venv\Scripts\python.exe -m ruff check src scripts tests
 ```
 
-In the source ZIP, `RELEASE_MANIFEST.json` records the exact submitted source and
-excluded research paths. In this workspace, plotting/manuscript tools, historical
+In the source ZIP, `RELEASE_MANIFEST.json` records the source file hashes.
+In this workspace, plotting/manuscript tools, historical
 source and delivery packages live under `../info dump/`, outside the application.
 The current source ZIP and its manifest are in `../info dump/delivery/`.
 The supplied PIA author source is

@@ -71,8 +71,7 @@ def validate_freeze(freeze_path: Path):
     expanded = freeze["representation"] == EXPANDED_REPRESENTATION
     paths = {name: _bound(freeze[name], bindings) for name in
              ("checkpoint", "run", "threshold", "calibration", "preprocessing")}
-    # Own trusted project checkpoints only. This matches the frozen SeePAT reader;
-    # do not supply arbitrary downloaded pickle checkpoints.
+    # The hash check above must pass before loading this trusted project checkpoint.
     checkpoint = torch.load(paths["checkpoint"], map_location="cpu", weights_only=False)
     contract, options = checkpoint["resume_contract"], checkpoint["options"]
     if (checkpoint.get("checkpoint_type") != "seepat_evaluation_model"
@@ -222,8 +221,7 @@ def score_prepared(model, dataset, requested_videos, threshold, *, device="cpu",
     records = _score_events(model, dataset, device, batch_size, progress) if len(dataset) else []
     maxima = {}
     for record in records:
-        # Existing scorer preserves targets for evaluation. Inference has no
-        # targets: remove unavailable bookkeeping, never assign real/fake labels.
+        # The shared scorer also serves evaluation; local inputs have no ground-truth labels.
         record.pop("label", None)
         record.pop("video_label", None)
         identifier = record["video_id"]
@@ -455,7 +453,7 @@ def main(argv=None):
                 if loaded_contract != result["contract"]:
                     raise ValueError("Model contract changed before scoring")
             else:
-                model = torch.nn.Identity()  # No binary prediction for an entirely unscorable inventory.
+                model = torch.nn.Identity()
 
             def progress(phase, done, total, item):
                 print(f"FROZEN INFERENCE | {phase} | {done}/{total} | {item}", flush=True)

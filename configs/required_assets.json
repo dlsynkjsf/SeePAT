@@ -1,5 +1,5 @@
 {
-  "scope": "Code only; these existing assets are supplied separately at their bound paths",
+  "scope": "Runtime assets required by SeePAT.",
   "local_model": {
     "checkpoint": {
       "path": "outputs/training/fusion_phase2_v1/experiments/focal/checkpoint_best.pt",
@@ -18,7 +18,7 @@
       "sha256": "d986fcf12747ba798c68664a76b45dd956f71cefc0a9a962072627acf73d9b39"
     },
     "preprocessing": {
-      "path": "configs/phase2_val_outer1000.yaml",
+      "path": "configs/preprocessing.yaml",
       "sha256": "a81906a68c82e1a9a5f44f0d314d759e5c0f1745dec431dc33670b9876e44daf"
     }
   },

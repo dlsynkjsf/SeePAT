@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import math
 from pathlib import Path
 from typing import Any
 
 from seepat.artifacts import read_csv_rows
-from seepat.evidence import calibrated_manifest_contract, evidence_feature_values
+from seepat.evidence import calibrated_manifest_contract, evidence_feature_values, finite_float
 from seepat.evidence import evidence_coverage as _evidence_coverage
 
 FEATURE_FIELDS = (
@@ -62,17 +61,9 @@ def numeric_feature_values(row: dict[str, str]) -> tuple[list[float], list[bool]
     values: list[float] = []
     mask: list[bool] = []
     for field in FEATURE_FIELDS:
-        try:
-            value = float(row.get(field, ""))
-        except (TypeError, ValueError):
-            value = 0.0
-            available = False
-        else:
-            available = math.isfinite(value)
-            if not available:
-                value = 0.0
-        values.append(value)
-        mask.append(available)
+        value = finite_float(row.get(field, ""))
+        values.append(value if value is not None else 0.0)
+        mask.append(value is not None)
     return values, mask
 
 

@@ -99,12 +99,12 @@ class VideoPlayer(ttk.Frame):
                 raise RuntimeError(self.error)
             frame, delay = self.player.get_frame(force_refresh=self.refresh)
             duration = seconds(self.player.get_metadata().get("duration"))
+            # The decoder clock is safe to read only after it has produced a frame.
             self.point = seconds(frame[1]) if frame else self.point
-            point = self.point
             self.position.configure(to=duration or 1, state="normal" if duration else "disabled")
             if not self.dragging:
-                self.position.set(point)
-            self.time.configure(text=f"{clock(point)} / {clock(duration)}")
+                self.position.set(self.point)
+            self.time.configure(text=f"{clock(self.point)} / {clock(duration)}")
             if frame:
                 from PIL import Image
 

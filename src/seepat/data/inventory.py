@@ -35,8 +35,7 @@ ON videos(original);
 
 def iter_metadata(path: Path) -> Iterator[dict[str, object]]:
     with path.open("rb") as stream:
-        # AV++ segment timestamps are ordinary floats. Parsing them as floats
-        # keeps streamed values JSON-serializable without loading the array.
+        # Stream timestamps as floats so each record can be written back to JSON.
         yield from ijson.items(stream, "item", use_float=True)
 
 

@@ -68,7 +68,6 @@ MODEL_TRAINING_VERSIONS = {
     TEMPCNN_MODEL: "tempcnn-gray16-v1",
     VISUAL_FUSION_MODEL: "visual-fusion-v1",
 }
-# Backward-compatible public name for existing Swin run records and callers.
 TRAINING_VERSION = MODEL_TRAINING_VERSIONS[SWIN_BASE_MODEL]
 VIDEO_F1_SELECTION = "validation_video_f1"
 VIDEO_BALANCED_ACCURACY_SELECTION = "validation_video_balanced_accuracy"
@@ -735,8 +734,6 @@ def train_model(
         if options.class_weighting in {"balanced", "balanced_global"}
         else None
     )
-    # Global Train weights must survive batch size one and gradient accumulation.
-    # Retain the old batch-normalized mode for historical checkpoint replay.
     reduction = "none" if options.class_weighting == "balanced_global" else "mean"
     loss_function: nn.Module = (
         _FocalLoss(class_weights, options.focal_gamma, reduction)
@@ -784,7 +781,7 @@ def train_model(
         nonlocal global_step
         global_step += 1
 
-    # GradScaler can skip optimizer.step() when gradients overflow.
+    # Count actual updates, since AMP can skip a step when gradients overflow.
     optimizer.register_step_post_hook(count_optimizer_step)
 
     started_at = datetime.now(UTC).isoformat()
@@ -977,7 +974,7 @@ def train_model(
                 ):
                     step_before = global_step
                     if not scaler.is_enabled():
-                        # Validate full-precision gradients without clipping their norm.
+                        # An infinite limit checks for bad gradients without clipping good ones.
                         nn.utils.clip_grad_norm_(
                             trainable_parameters, float("inf"), error_if_nonfinite=True,
                         )
@@ -1215,8 +1212,6 @@ def _initialize_model_from_checkpoint(
                 or contract.get("validation_manifest_sha256") != matched["source_manifest_sha256"]["val"]
                 or _sha256(checkpoint_path) != matched["profile"]["initial_checkpoint_sha256"]):
             raise ValueError("Matched warm start differs from pinned original manifests/calibration/checkpoint")
-        # The changed clip indexes replace manifest identity only; original
-        # source manifests and calibration were explicitly checked above.
         immutable = tuple(key for key in immutable if key not in {
             "train_manifest_sha256", "validation_manifest_sha256", "fusion_inputs"
         })

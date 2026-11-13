@@ -7,15 +7,7 @@ from pathlib import Path
 
 from seepat.artifacts import file_sha256
 from seepat.preprocessing.face import MouthEventAnalyzer
-
-
-def crop_bounds(points: dict, width: int, height: int) -> tuple[int, int, int, int]:
-    # Same 1.8x lip-landmark square/minimum-24 geometry as MouthEventAnalyzer.analyze.
-    xs, ys = zip(*points.values(), strict=True)
-    cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
-    side = max(24.0, 1.8 * max(max(xs) - min(xs), max(ys) - min(ys)))
-    return (max(0, int(cx - side / 2)), max(0, int(cy - side / 2)),
-            min(width, int(cx + side / 2)), min(height, int(cy + side / 2)))
+from seepat.preprocessing.face import mouth_crop_bounds as crop_bounds
 
 
 def decode_needed(path: Path, needed: set[int], expected_count: int, progress) -> tuple[dict, int]:

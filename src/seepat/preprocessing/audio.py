@@ -177,7 +177,7 @@ def _stage_is_current(output_path: Path, metadata_path: Path, contract: dict[str
         return False
     try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError):
         return False
     return metadata.get("contract") == contract
 
@@ -208,7 +208,7 @@ def _publish_stage_output(
 def _read_stage_outcome(metadata_path: Path) -> dict[str, object]:
     try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError):
         return {}
     outcome = metadata.get("outcome", {})
     return outcome if isinstance(outcome, dict) else {}

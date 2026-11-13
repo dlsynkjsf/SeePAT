@@ -27,7 +27,7 @@ def summarize_progress(
         result_path = cache_dir / stable_id(row["file"]) / "result.json"
         try:
             cached = json.loads(result_path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
+        except (json.JSONDecodeError, OSError):
             continue
         if cached.get("cache_signature") != cache_signature:
             continue
@@ -90,7 +90,7 @@ def format_progress(progress: dict[str, object]) -> str:
 def _read_run_record(path: Path) -> dict[str, object]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError):
         return {}
     return value if isinstance(value, dict) else {}
 
@@ -98,7 +98,7 @@ def _read_run_record(path: Path) -> dict[str, object]:
 def _completed_history_epochs(path: Path) -> int:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError):
         return 0
     if not isinstance(value, list):
         return 0

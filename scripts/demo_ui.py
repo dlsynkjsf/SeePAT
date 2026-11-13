@@ -189,6 +189,7 @@ class Analyses:
         progress = read(progress_path) if progress_path.exists() else {}
         stages = {name: (folder / "run" / name / "summary.json").is_file()
                   for name in STAGES.values()}
+        # A half-written stage needs review before it can be resumed safely.
         partial = any((folder / "run" / name).exists() and not done for name, done in stages.items())
         result = {"id": identity, "filename": record["filename"], "created_at": record["created_at"],
                   "origin": record.get("origin", "personal-recording"),
@@ -264,7 +265,7 @@ class Desktop:
         self.dialog, self.message = filedialog, messagebox
         self.current = self.source = self.selected = self.output = None
         self.timer = None
-        root.title("SeePAT - Video analysis")
+        root.title("DS13 - 4CSD - SeePAT")
         root.geometry("1120x680")
         root.minsize(940, 600)
         root.protocol("WM_DELETE_WINDOW", self.close)
@@ -288,12 +289,10 @@ class Desktop:
         style.configure("Horizontal.TProgressbar", background=ACCENT, troughcolor="#e8eef3", borderwidth=0)
         style.configure("Header.TFrame", background=NAVY)
         style.configure("Brand.TLabel", background=NAVY, foreground="white", font=("Segoe UI", 21, "bold"))
-        style.configure("Subtitle.TLabel", background=NAVY, foreground="#d2e2ed")
         style.configure("Status.TLabel", background="#edf2f6", foreground="#516479", padding=(20, 10))
         header = ttk.Frame(root, style="Header.TFrame", padding=(20, 12))
         header.pack(fill="x")
         ttk.Label(header, text="SeePAT", style="Brand.TLabel").pack(side="left")
-        ttk.Label(header, text="Video authenticity analysis", style="Subtitle.TLabel").pack(side="left", padx=20)
         self.status = tk.StringVar()
         ttk.Label(root, textvariable=self.status, style="Status.TLabel", wraplength=880).pack(side="bottom", fill="x")
         frame = ttk.Frame(root, padding=(20, 16))
@@ -392,8 +391,9 @@ class Desktop:
         self.status.set("Choose your video, then select Analyze video." if own else "Select a saved example to inspect its existing report.")
         if not own and not self.example_items:
             self.status.set("No saved examples are available on this installation.")
-        if own and self.store.active():
-            self.load_job(self.store.active())
+        active = self.store.active() if own else None
+        if active:
+            self.load_job(active)
         self.buttons()
 
     def select(self):
@@ -513,6 +513,7 @@ class Desktop:
         if self.timer:
             self.root.after_cancel(self.timer)
         try:
+            # Keep an own-video worker from replacing the saved example on screen.
             if self.mode.get() == "Your video" and self.current and self.current["status"] not in {"complete", "failed", "interrupted"}:
                 self.load_job(self.current["id"])
             self.buttons()

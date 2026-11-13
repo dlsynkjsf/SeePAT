@@ -144,9 +144,8 @@ class VideoProcessor:
             report["exclusion_reason"] = reason
             report["eligible_event_count"] = eligible_count
             report["pipeline_status"] = "complete"
-        # Dataset-scale preprocessing must record a per-video failure and
-        # continue. The exception type and traceback remain in the audit.
         except Exception as error:  # noqa: BLE001
+            # Record this video's failure so the rest of the batch can still finish.
             if isinstance(error, MfaAlignmentError):
                 report["exclusion_reason"] = "alignment_failed"
             report["error_type"] = type(error).__name__

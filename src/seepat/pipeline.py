@@ -18,7 +18,6 @@ from seepat.preprocessing.face import MouthEventAnalyzer
 from seepat.preprocessing.processor import VideoProcessor
 from seepat.preprocessing.transcription import WhisperTranscriber
 
-# Raw-pixel measurements are an additive sidecar, not a preprocessing invalidation.
 PIPELINE_VERSION = "pilot-v4"
 ELIGIBILITY_REPORT_FIELDS = (
     "video_id",

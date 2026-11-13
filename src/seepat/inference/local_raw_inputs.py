@@ -157,7 +157,6 @@ def validate_prepared_provenance(spec, rows, requested, bindings):
 def _destination(validated, output):
     output = output.resolve()
     protected = [Path(row["path"]).parent for row in validated["bindings"]]
-    # A sibling output is fine, but never nest in raw/model/cache inputs or contain them.
     for source in validated["bindings"]:
         path = Path(source["path"])
         if output == path or path.is_relative_to(output):
@@ -210,8 +209,6 @@ def export_prepared(validated, output_dir, *, processor_factory=None, engineerin
         progress("initialize speech and vision", 0, len(validated["sources"]), "")
     requested, provenance, all_events, context_records = [], [], [], []
     settings = validated["settings"]
-    # New transcription/alignment/trace/clip work lives only in this fresh package.
-    # Shared model caches keep their frozen locations; they are not training caches.
     settings = replace(settings, preprocessing=replace(settings.preprocessing, output_dir=output / "preprocessing"))
     with (processor_factory or local_media_processor)(settings) as processor:
         for index, source in enumerate(validated["sources"], 1):
@@ -294,7 +291,6 @@ def export_prepared(validated, output_dir, *, processor_factory=None, engineerin
     if all_events:
         score_manifests_with_calibration(calibration, {"local": raw_manifest}, output / "calibrated")
     else:
-        # No eligible events means no forest fit, not an authentic prediction.
         atomic_write_csv(calibrated, [])
         atomic_write_json(calibrated.parent / "summary.json", {
             "mode": "score_only", "calibration_version": CALIBRATION_VERSION,
@@ -376,7 +372,6 @@ class _LocalMedia:
         return report, events
 
     def contexts(self, source, report, directory):
-        # The immutable exporter itself is NOT run or redirected at local inputs.
         from seepat.coverage import context_windows
 
         from . import context_media as accepted

@@ -1,13 +1,7 @@
-"""Deepfake-Eval-2024 evaluation split adapter (Figure 4.1 dataset node).
+"""Convert a local Deepfake-Eval-2024 JSON/CSV index to the AV++ manifest schema.
 
-The benchmark is evaluated as an external, unseen-generator test pool: its
-videos must never influence calibration or threshold selection. This adapter
-converts a local Deepfake-Eval-2024 index (JSON or CSV, prepared offline from
-the benchmark metadata) into a SeePAT pipeline manifest with the same schema
-as the AV++ manifests, so the existing preprocessing, frozen-calibration
-scoring, and verdict stages can run unchanged with ``split: test``.
-
-Expected index fields per entry:
+These external records use ``split: test`` and cannot fit calibration or cutoffs.
+Each index entry accepts:
 
 * ``file`` (required): media path relative to the configured archive root.
 * ``label`` (required): ``real``/``fake`` (case-insensitive) or ``0``/``1``.
@@ -16,8 +10,6 @@ Expected index fields per entry:
   segment when the benchmark does not provide fake segments.
 * ``subject_id``, ``original``, ``video_frames``, ``audio_frames`` (optional).
 
-The output manifest keeps the AV++ column schema so ``_training_row`` and the
-event-labeling logic consume it directly.
 """
 
 from __future__ import annotations

@@ -31,6 +31,8 @@ from seepat.workflow_config import (
 )
 
 WORKFLOW_VERSION = "local-pipeline-v2"
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(value, dict):
@@ -103,7 +105,7 @@ def preprocessing_outputs_are_current(
             and int(row.get("bilabial_event_count", 0)) > 0
         }
         return expected_trace_ids == {row["video_id"] for row in trace_rows}
-    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+    except (OSError, KeyError, TypeError, ValueError):
         return False
 
 
@@ -153,7 +155,7 @@ def training_outputs_are_current(
 
         expected_split_path = output_dir / f"events_{settings.dataset.split}.csv"
         return expected_split_path.is_file()
-    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+    except (OSError, KeyError, TypeError, ValueError):
         return False
 
 
@@ -357,7 +359,7 @@ def model_training_outputs_are_current(job: ModelTrainingJob) -> bool:
             and completed_as_planned
             and _model_training_configuration_matches(job, run_record)
         )
-    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+    except (OSError, TypeError, ValueError):
         return False
 
 

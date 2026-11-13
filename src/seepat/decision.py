@@ -87,7 +87,6 @@ def run_decision_job(job: DecisionJob, progress: ProgressCallback | None = None)
     from seepat.verdict import evaluation_inputs, run_verdict, select_threshold
     from seepat.xai import generate_forensic_trace
 
-    # Fail before writing anything if a preflight, foreign split or stale calibration is supplied.
     transfer = job.threshold_artifact is not None
     evaluation_inputs(
         job.validation_manifest,

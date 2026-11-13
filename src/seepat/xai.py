@@ -1,16 +1,7 @@
-"""Reasoning-LLM forensic trace (Figure 4.1 XAI output).
+"""Explain saved verdicts without changing their scores or decisions.
 
-The trace layer is strictly downstream of the verdict:
-
-* it consumes the frozen verdict artifacts (``evaluation.json``,
-  ``video_verdicts.csv``, ``event_predictions.csv``) as read-only evidence;
-* it never recomputes probabilities, thresholds or verdicts;
-* the reasoning LLM only translates the supplied numerical evidence into
-  human-readable text, with grounding rules that forbid inventing evidence.
-
-The default client is a deterministic template renderer that runs fully
-offline. :class:`OpenAICompatibleClient` provides an opt-in HTTP text client;
-the model response is advisory text and never enters the prediction path.
+Reports use an offline template by default. The optional HTTP client receives
+only the supplied evidence and returns advisory text, outside the prediction path.
 """
 
 from __future__ import annotations

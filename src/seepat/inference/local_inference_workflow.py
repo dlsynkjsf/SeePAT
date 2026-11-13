@@ -25,7 +25,7 @@ from .frozen_inference import (
     score_prepared,
     validate_inputs,
 )
-from .local_raw_inputs import _destination, export_prepared, validate_raw_request
+from .local_raw_inputs import _binding, _destination, export_prepared, validate_raw_request
 from .xai_paragraphs import human_summary
 
 VERSION = "local-inference-workflow-v1"
@@ -72,10 +72,6 @@ def workflow_runtime_hashes():
     return {name: file_sha256(here / name) for name in
             ("local_inference_workflow.py", "frozen_inference.py", "local_raw_inputs.py", "local_matched_inputs.py",
              "readable_xai.py", "xai_paragraphs.py")}
-
-
-def _binding(path):
-    return {"path": str(path.resolve()), "sha256": file_sha256(path)}
 
 
 def _clock(seconds):
@@ -239,7 +235,6 @@ def local_job_status(job, *, engineering=False):
             raise ValueError("Foreign or changed workflow contract")
         completed = _read_complete(output, contract)
         if (output / "prepared/summary.json").is_file():
-            # Existing directory + completion file guarantee this call only verifies/skips.
             export_prepared(validated, output / "prepared", engineering=engineering)
             prepared = validate_inputs(job.freeze, output / "prepared/inputs.json")
             stages["preparation"] = "current"
@@ -253,7 +248,8 @@ def local_job_status(job, *, engineering=False):
                 raise ValueError("Completed workflow coverage differs")
     _unchanged(validated["bindings"])
     if completed is None and all(value == "current" for value in stages.values()):
-        stages["explanation"] = "pending_or_stale"  # Final workflow seal is part of the last gate.
+        # Finished stages still need the workflow's final completion record.
+        stages["explanation"] = "pending_or_stale"
     return {"name": job.name, "stages": stages, "completion_current": completed is not None,
             "execution_ready": validated["execution_ready"]
             and validated["freeze"].get("local_workflow_sha256") == workflow_runtime_hashes()}

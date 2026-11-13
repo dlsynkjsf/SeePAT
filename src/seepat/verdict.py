@@ -1,20 +1,9 @@
-"""Binary event classification, maximum event aggregation and deepfake verdict.
+"""Score events, take each video's maximum probability, and apply a frozen cutoff.
 
-Implements the Figure 4.1 classification chain: every bilabial mouth event is
-scored by the trained model (event-level manipulation probability), video
-probabilities use maximum event aggregation, and a *frozen* threshold turns the
-probability into the deepfake verdict.
-
-Reproducibility rules:
-
-* Production decisions require a provenance-checked Validation threshold artifact.
-  An explicit threshold is allowed only in labelled engineering-preflight mode.
-* This development entry point currently evaluates AV++ Validation only.
-  External evaluation remains locked until the final experiment is frozen.
-* Calibration artifacts are read-only upstream inputs; this module never fits
-  or refits anything.
-* Videos that produced no scorable bilabial events are reported as
-  ``not_evaluated`` instead of being silently dropped.
+Production decisions use a verified Validation cutoff and read-only calibration.
+An explicit cutoff is allowed only in engineering preflight. Videos without
+scorable events remain ``not_evaluated``. This command accepts AV++ Validation;
+external assessment uses a separate route.
 """
 
 from __future__ import annotations

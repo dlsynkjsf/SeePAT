@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import re
 from collections import defaultdict
 from dataclasses import asdict, dataclass
@@ -21,6 +20,7 @@ from seepat.artifacts import (
     read_csv_rows,
     stable_id,
 )
+from seepat.evidence import finite_float
 from seepat.live_progress import ProgressCallback
 from seepat.preprocessing.augmentation import (
     augmented_trace_for_row,
@@ -52,20 +52,12 @@ class CalibrationOptions:
 DEFAULT_CALIBRATION_OPTIONS = CalibrationOptions()
 
 
-def _float_or_none(value: object) -> float | None:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    return number if math.isfinite(number) else None
-
-
 def _valid_frame(frame: dict[str, object]) -> bool:
-    raw = _float_or_none(frame.get("raw_vild_px"))
-    bbox = _float_or_none(frame.get("face_bbox_size_px"))
+    raw = finite_float(frame.get("raw_vild_px"))
+    bbox = finite_float(frame.get("face_bbox_size_px"))
     return (
         frame.get("face_count") == 1
-        and _float_or_none(frame.get("normalized_vild")) is not None
+        and finite_float(frame.get("normalized_vild")) is not None
         and raw is not None
         and raw >= 0
         and bbox is not None
@@ -123,7 +115,6 @@ def _residual(bbox: float, raw: float, model: dict[str, object]) -> float:
 
 def _event_minimum(trace: dict[str, object], row: dict[str, str]) -> dict[str, object] | None:
     frames = event_vild_frames(trace, row.get("vild_trace_event_key") or row["event_id"])
-    # Earliest frame breaks ties deterministically, matching the event-window timeline.
     return min(
         (frame for frame in frames if _valid_frame(frame)),
         key=lambda frame: (float(frame["raw_vild_px"]), float(frame["timestamp_s"])),
@@ -144,13 +135,12 @@ def _fit_population(
     for index, (video_id, rows) in enumerate(groups.items()):
         if progress is not None:
             progress("fit Train population", index, len(groups), video_id)
-        # One decompression per video in this pass, regardless of event count.
         trace = augmented_trace_for_row(rows[0])
         references = reference_samples(trace, options)
         samples.extend(references)
         reference_videos += bool(references)
         for row in rows:
-            # Labels are allowed ONLY for genuine-Train phoneme expectations.
+            # Learn expected phoneme closure only from genuine Train events.
             if row.get("class_id") != "0":
                 continue
             minimum = _event_minimum(trace, row)
@@ -165,7 +155,6 @@ def _fit_population(
     for phoneme, minima in sorted(genuine_minima.items()):
         values = [_residual(bbox, raw, regression) for bbox, raw in minima]
         scale = float(np.std(values))
-        # A single/constant observation cannot establish a standardized deviation.
         expectations[phoneme] = {
             "count": len(values),
             "mean_residual_px": float(np.mean(values)),
@@ -251,9 +240,9 @@ def _score_video(
                     (residual - stats["mean_residual_px"]) / stats["scale_residual_px"], 9
                 )
             if forest is not None:
+                # sklearn gives lower scores to anomalies; the report uses the opposite sign.
                 scored.update(
                     {
-                        # sklearn returns the negative of the paper's path-length anomaly score.
                         "isolation_forest_anomaly_score": round(
                             float(-forest.score_samples([[residual]])[0]), 9
                         ),

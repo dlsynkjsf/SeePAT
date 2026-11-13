@@ -1,26 +1,26 @@
-report: outputs/workflow_submission_v2_summary.json
+report: outputs/local_inference/workflow.json
 local_inference:
-- name: local-inference-example-01
-  freeze: configs/local_inference_contract.submission.json
+- name: example-01
+  freeze: configs/model.json
   raw_inputs: configs/local_inference_case_01.json
-  output_dir: outputs/local_inference/submission_examples_v2/case_01
+  output_dir: outputs/local_inference/examples/case_01
   device: cuda
   batch_size: 1
-- name: local-inference-example-02
-  freeze: configs/local_inference_contract.submission.json
+- name: example-02
+  freeze: configs/model.json
   raw_inputs: configs/local_inference_case_02.json
-  output_dir: outputs/local_inference/submission_examples_v2/case_02
+  output_dir: outputs/local_inference/examples/case_02
   device: cuda
   batch_size: 1
-- name: local-inference-example-03
-  freeze: configs/local_inference_contract.submission.json
+- name: example-03
+  freeze: configs/model.json
   raw_inputs: configs/local_inference_case_03.json
-  output_dir: outputs/local_inference/submission_examples_v2/case_03
+  output_dir: outputs/local_inference/examples/case_03
   device: cuda
   batch_size: 1
-- name: local-inference-example-04
-  freeze: configs/local_inference_contract.submission.json
+- name: example-04
+  freeze: configs/model.json
   raw_inputs: configs/local_inference_case_04.json
-  output_dir: outputs/local_inference/submission_examples_v2/case_04
+  output_dir: outputs/local_inference/examples/case_04
   device: cuda
   batch_size: 1

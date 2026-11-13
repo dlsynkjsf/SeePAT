@@ -111,7 +111,6 @@ def event_timing_sequence(row, trace, *, decoded_frame_count, sequence_length=16
     fps = _number(trace["timing"].get("fps"))
     if fps <= 0 or not 0 <= start <= stop:
         raise ValueError("Trace FPS/window bounds must be positive and ordered")
-    # Match the crop producer's inclusive floor/ceil bounds, including edge frames.
     first, last = timestamp_to_frame(start, fps), timestamp_to_frame(stop, fps, round_up=True)
     if any(not first <= i <= last for i in ids):
         raise ValueError("Crop frame is outside its recorded rounded frame bounds")
