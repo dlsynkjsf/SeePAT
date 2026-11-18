@@ -6,17 +6,19 @@ import time
 import tkinter as tk
 from pathlib import Path
 
-from scripts.video_player import VideoPlayer, clock
+from scripts.video_player import VideoPlayer, clock, sdl_mixer
 
 
 class Media:
+    """Fake FFPyPlayer MediaPlayer."""
+
     def __init__(self, *args, **kwargs):
-        self.paused, self.closed, self.point, self.muted = True, False, 0, False
+        self.paused, self.closed, self.point, self.volume = True, False, 0, 1.0
         self.seeks = []
         self.options = kwargs
 
-    def set_mute(self, value):
-        self.muted = value
+    def set_volume(self, value):
+        self.volume = value
 
     def set_pause(self, value):
         self.paused = value
@@ -42,7 +44,8 @@ class Media:
         self.closed = True
 
 
-def test_controls_seek_guard_source_switch_and_close_release_player(native_window):
+def test_controls_seek_guard_source_switch_and_close_release_player(native_window, monkeypatch):
+    monkeypatch.setattr('scripts.video_player.sdl_mixer', lambda: None)
     root = native_window
     player = VideoPlayer(root, factory=Media)
     try:
@@ -56,10 +59,15 @@ def test_controls_seek_guard_source_switch_and_close_release_player(native_windo
         assert first.seeks == [(3.75, {'relative':False, 'accurate':True})]
         player.muted.set(True)
         player.mute()
-        assert first.muted
+        assert player.player is first and first.volume == 0 and len(first.seeks) == 1  # same player, no restart
         player.load('another.mp4')
         assert first.closed and player.player is not first and player.frame is None
         current = player.player
+        player.tick()
+        assert current.volume == 0  # a new video keeps the Mute choice
+        player.muted.set(False)
+        player.mute()
+        assert current.volume == 1
         player.position.set(7)
         current.options['callback']('audio:error', 'Synthetic audio failure')
         player.tick()
@@ -112,6 +120,14 @@ def test_playback_controls_remain_visible_when_preview_is_short(native_window):
         player.close()
 
 
+def mixer_volumes():
+    """Volume of each playing SDL_mixer channel; empty while the mixer is closed."""
+    mixer = sdl_mixer()
+    if not mixer.Mix_QuerySpec(None, None, None):
+        return {}
+    return {ch: mixer.Mix_Volume(ch, -1) for ch in range(mixer.Mix_AllocateChannels(-1)) if mixer.Mix_Playing(ch)}
+
+
 def check_playback(path):
     root = tk.Tk()
     root.withdraw()
@@ -130,6 +146,19 @@ def check_playback(path):
         assert widget.player.get_metadata()['duration'] >= 2.9
         widget.toggle()
         until(lambda: widget.point >= .25)
+        until(lambda: mixer_volumes())
+        for muted, volume in ((True, 0), (False, 128)):  # Mute/unmute while playing
+            point, seen = widget.point, []
+            widget.muted.set(muted)
+            widget.mute()
+            assert set(mixer_volumes().values()) == {volume}
+            until(lambda seen=seen, point=point: seen.append(widget.point) or widget.point >= point + .2)
+            assert min(seen) >= point - .15  # continues, no jump back to 0:00
+        widget.muted.set(True)  # Mute ticked before a new video starts
+        widget.load(path)
+        until(lambda: widget.frame is not None)
+        widget.toggle()
+        until(lambda: set(mixer_volumes().values()) == {0})
         widget.toggle()
         assert widget.player.get_pause()
         widget.seek(1.5)

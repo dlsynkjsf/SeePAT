@@ -85,6 +85,23 @@ def test_invalid_files_start_no_work(store, name, size, origin):
     assert not store.state()['jobs'] and not store.calls
 
 
+def test_locked_external_test_folder_is_rejected_before_any_work(store):
+    folder = store.root / 'data/raw/deepfake_eval_2024_locked/video-data'
+    folder.mkdir(parents=True)
+    source = folder / '_2OdL6NwQnJJ4mfZl-4KRpNEv1s.mp4'
+    source.write_bytes(b'x' * 10)
+    with pytest.raises(ValueError, match='locked external test set'):
+        store.create(source, 'personal-recording')
+    assert not store.state()['jobs'] and not store.calls
+    # A job saved by the earlier filename-only check cannot be resumed into the worker either.
+    item = upload(store)
+    record = store.folder(item['id']) / 'record.json'
+    atomic_write_json(record, {**ui.read(record), 'source': str(source)})
+    with pytest.raises(ValueError, match='locked external test set'):
+        store.start(item['id'])
+    assert not store.calls
+
+
 def test_ui_cannot_take_over_existing_scientific_outputs(store):
     folder = store.root / 'outputs/existing-study'
     folder.mkdir()

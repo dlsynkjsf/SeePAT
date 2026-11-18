@@ -36,6 +36,13 @@ def read(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def refuse_locked(source):
+    """Refuse Deepfake-Eval-2024 (locked external test) paths, as the worker does."""
+    if "deepfakeeval" in re.sub(r"[^a-z0-9]", "", str(source).lower()):
+        raise ValueError("This video is in the locked external test set (Deepfake-Eval-2024) and cannot be "
+                         "analysed here. Choose your own recording or an AV-Deepfake1M++ demo video.")
+
+
 class Analyses:
     def __init__(self, root=ROOT, config=None, *, launch=subprocess.Popen, alive=process_alive):
         self.root = root.resolve()
@@ -72,11 +79,12 @@ class Analyses:
 
     def create(self, source, origin):
         source = Path(source).resolve(strict=True)
+        refuse_locked(source)
         if (not source.is_file() or not 0 < source.stat().st_size <= self.limit
                 or source.suffix.lower() not in EXTENSIONS
-                or origin not in {"personal-recording", "local-demo"}
-                or "deepfakeeval" in re.sub(r"[^a-z0-9]", "", source.name.lower())):
-            raise ValueError("Choose a supported personal/demo video within the size limit")
+                or origin not in {"personal-recording", "local-demo"}):
+            raise ValueError(f"Choose a .mp4, .mov, .mkv, .webm or .avi video up to "
+                             f"{self.limit // 1024**2} MB")
         digest = file_sha256(source)
         identity = uuid.uuid4().hex
         folder = self.folder(identity)
@@ -123,6 +131,7 @@ class Analyses:
         with self.lock:
             folder = self.folder(identity)
             record = read(folder / "record.json")
+            refuse_locked(record["source"])
             if self.active():
                 raise ValueError("An analysis is already running; let it finish first")
             state = self.snapshot(identity)

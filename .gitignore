@@ -28,6 +28,7 @@ data/raw/
 data/extracted/
 data/cache/
 data/training/
+data/demo_videos/
 data/manifests/*.sqlite
 data/manifests/*.sqlite-*
 data/manifests/*.csv

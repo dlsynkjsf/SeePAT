@@ -1,23 +1,41 @@
-"""Embedded Tk playback; FFPyPlayer owns the audio/video clock and decoder."""
+"""Video preview widget for the SeePAT desktop window (Tk + FFPyPlayer)."""
 
+import ctypes
+import functools
 import logging
 import math
 import tkinter as tk
+from pathlib import Path
 from tkinter import ttk
 
 logger = logging.getLogger(__name__)
 
+
+@functools.cache
+def sdl_mixer():
+    """SDL_mixer library used by FFPyPlayer for audio, or None if this build has none."""
+    import ffpyplayer
+
+    dll = next((Path(p) / "SDL2_mixer.dll" for p in getattr(ffpyplayer, "dep_bins", [])
+                if (Path(p) / "SDL2_mixer.dll").is_file()), None)
+    return ctypes.CDLL(str(dll)) if dll else None
+
+
 def seconds(value):
+    """Non-negative finite seconds; anything else becomes 0."""
     value = float(value or 0)
     return value if math.isfinite(value) and value >= 0 else 0
 
 
 def clock(value):
+    """Seconds as mm:ss.ss."""
     value = seconds(value)
     return f"{int(value // 60):02d}:{value % 60:05.2f}"
 
 
 class VideoPlayer(ttk.Frame):
+    """Preview canvas with Play/Pause, seek bar, time label and Mute."""
+
     def __init__(self, parent, check_source=lambda: None, factory=None):
         super().__init__(parent)
         self.check_source, self.factory = check_source, factory
@@ -44,6 +62,7 @@ class VideoPlayer(ttk.Frame):
         self.canvas.pack(fill="both", expand=True)
 
     def load(self, path):
+        """Open a video paused on its first frame."""
         self.close()
         try:
             factory = self.factory
@@ -53,7 +72,6 @@ class VideoPlayer(ttk.Frame):
                 factory = MediaPlayer
             self.player = factory(str(path), callback=self.event, ff_opts={"paused": True,
                 "out_fmt": "rgb24", "af": "aresample=async=1:first_pts=0,aformat=sample_fmts=s16:channel_layouts=stereo"}, loglevel="error")
-            self.player.set_mute(self.muted.get())
             self.refresh = True
             self.tick()
         except Exception as error:
@@ -61,6 +79,7 @@ class VideoPlayer(ttk.Frame):
             self.fail(error)
 
     def toggle(self):
+        """Play/Pause button; restarts from 0 after the end."""
         try:
             self.check_source()
             if self.ended:
@@ -72,6 +91,7 @@ class VideoPlayer(ttk.Frame):
             self.fail(error)
 
     def seek(self, point):
+        """Jump to a time in seconds and play from there."""
         try:
             self.check_source()
             self.player.set_pause(False)
@@ -82,15 +102,22 @@ class VideoPlayer(ttk.Frame):
             self.fail(error)
 
     def scrub(self, _event=None):
+        """Seek bar released: jump to its position."""
         self.dragging = False
         if self.player:
             self.seek(self.position.get())
 
     def mute(self):
-        if self.player:
-            self.player.set_mute(self.muted.get())
+        """Mute checkbox: set the volume in place, so playback keeps its position."""
+        if not self.player:
+            return
+        mixer = sdl_mixer()
+        # SDL_mixer volume calls are only valid while its audio device is open.
+        if mixer is None or mixer.Mix_QuerySpec(None, None, None):
+            self.player.set_volume(0.0 if self.muted.get() else 1.0)
 
     def tick(self):
+        """Playback loop: draw the next frame, update controls, reapply Mute."""
         self.timer = None
         if not self.player:
             return
@@ -101,6 +128,7 @@ class VideoPlayer(ttk.Frame):
             duration = seconds(self.player.get_metadata().get("duration"))
             # The decoder clock is safe to read only after it has produced a frame.
             self.point = seconds(frame[1]) if frame else self.point
+            self.mute()
             self.position.configure(to=duration or 1, state="normal" if duration else "disabled")
             if not self.dragging:
                 self.position.set(self.point)
@@ -124,6 +152,7 @@ class VideoPlayer(ttk.Frame):
             self.fail(error)
 
     def draw(self):
+        """Fit the current frame to the canvas."""
         width, height = max(1, self.canvas.winfo_width()), max(1, self.canvas.winfo_height())
         self.canvas.coords("hint", width / 2, height / 2)
         if self.frame:
@@ -137,14 +166,17 @@ class VideoPlayer(ttk.Frame):
             self.canvas.create_image(width / 2, height / 2, image=self.photo, tags="video")
 
     def fail(self, error):
+        """Close playback and show the error on the canvas."""
         self.close()
         self.canvas.itemconfigure("hint", text=f"Playback unavailable: {error}", width=400)
 
     def event(self, selector, value):
+        """FFPyPlayer callback: remember decoder errors for the next tick."""
         if selector.endswith(":error"):
             self.error = str(value or selector)
 
     def close(self):
+        """Release the player and reset the controls."""
         if self.timer:
             self.after_cancel(self.timer)
             self.timer = None
