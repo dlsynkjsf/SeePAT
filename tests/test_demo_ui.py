@@ -190,7 +190,7 @@ class FakeVideo:
         self.point = point
 
 
-def test_native_selection_progress_explanation_toggle_and_review_keep_saved_evidence(store, monkeypatch, native_window):
+def test_native_selection_progress_explanation_toggle_and_review_keep_saved_evidence(store, monkeypatch, native_window, capsys):
     root = native_window
     try:
         app = ui.Desktop(root, store, player_factory=FakeVideo)
@@ -203,8 +203,15 @@ def test_native_selection_progress_explanation_toggle_and_review_keep_saved_evid
         app.launch(False)
         assert app.current['status'] == 'queued' and app.analyze.instate(['disabled'])
         identity = app.current['id']
+        with (store.folder(identity) / 'console.log').open('a') as log:
+            log.write('12:00:00 running | prepare local videos\npartial')
+        app.poll()
+        assert capsys.readouterr().out.endswith('prepare local videos\n')
         complete(store, identity, 'authentic')
         app.poll()
+        out = capsys.readouterr().out
+        assert out.startswith('partial') and 'SeePAT result: Authentic (real) (score 0.2000, cutoff 0.5000)' in out
+        assert app.echo is None
         assert app.verdict['text'] == 'Authentic (real)'
         assert 'authentic (real)' in app.trace.get('1.0', 'end').lower()
         root.geometry('940x600')

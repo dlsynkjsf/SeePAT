@@ -2,13 +2,46 @@
 
 import ctypes
 import functools
+import hashlib
 import logging
 import math
+import subprocess
+import tempfile
 import tkinter as tk
 from pathlib import Path
 from tkinter import ttk
 
+from seepat.preprocessing.media import find_media_binary
+
 logger = logging.getLogger(__name__)
+# Only for originals that cannot get a preview copy: mono PCM with an unknown channel layout stops
+# FFPyPlayer's audio thread, but this filter also breaks audio timestamps after a seek.
+STEREO_FILTER = "aresample=async=1:first_pts=0,aformat=sample_fmts=s16:channel_layouts=stereo"
+
+
+def preview_copy(path):
+    """All-keyframe, stereo-PCM copy of a video for the preview player only.
+
+    FFPyPlayer's accurate seek skips only video frames before the target, so audio restarts at
+    the nearest video keyframe (0 s in the AV++ clips) and the video crawls at half speed while
+    waiting for it. With every frame a keyframe and a plain stereo track, both streams land on
+    the target. The analysed original is never changed.
+    """
+    path = Path(path)
+    stat = path.stat()
+    key = hashlib.sha256(f"{path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}".encode()).hexdigest()[:24]
+    # ponytail: no cache eviction; temp folder grows ~1 MB per demo clip, ~45 MB per minute of 1080p.
+    target = Path(tempfile.gettempdir()) / "seepat-preview" / f"{key}.mov"
+    if not target.is_file():
+        target.parent.mkdir(exist_ok=True)
+        partial = target.with_name(f"{key}.partial.mov")
+        # ponytail: runs on the Tk thread (~0.1 s per demo clip, ~3 s per minute of 1080p).
+        subprocess.run([str(find_media_binary("ffmpeg")), "-v", "error", "-y", "-i", str(path),
+            "-map", "0:v:0", "-map", "0:a:0?", "-vf", "scale=-2:'min(480,trunc(ih/2)*2)'",
+            "-c:v", "libx264", "-preset", "ultrafast", "-g", "1", "-pix_fmt", "yuv420p",
+            "-c:a", "pcm_s16le", "-ac", "2", str(partial)], check=True, capture_output=True, timeout=600)
+        partial.replace(target)
+    return target
 
 
 @functools.cache
@@ -64,14 +97,21 @@ class VideoPlayer(ttk.Frame):
     def load(self, path):
         """Open a video paused on its first frame."""
         self.close()
+        self.canvas.itemconfigure("hint", text="Preparing preview...")
+        self.update_idletasks()
+        try:
+            source, options = preview_copy(path), {}
+        except (OSError, subprocess.SubprocessError) as error:
+            logger.warning("Preview copy unavailable, seeking may drift out of sync: %s", error)
+            source, options = path, {"af": STEREO_FILTER}
         try:
             factory = self.factory
             if factory is None:
                 from ffpyplayer.player import MediaPlayer
 
                 factory = MediaPlayer
-            self.player = factory(str(path), callback=self.event, ff_opts={"paused": True,
-                "out_fmt": "rgb24", "af": "aresample=async=1:first_pts=0,aformat=sample_fmts=s16:channel_layouts=stereo"}, loglevel="error")
+            self.player = factory(str(source), callback=self.event,
+                ff_opts={"paused": True, "out_fmt": "rgb24", **options}, loglevel="error")
             self.refresh = True
             self.tick()
         except Exception as error:

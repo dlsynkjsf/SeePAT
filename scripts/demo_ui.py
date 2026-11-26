@@ -19,6 +19,7 @@ sys.path[:0] = [str(ROOT), str(ROOT / "src")]
 
 from scripts.assessment_runtime import archive_lock, process_alive
 from scripts.report_wording import video_summary
+from scripts.seepat_cli import compact_progress
 from seepat.artifacts import atomic_write_json, file_sha256
 from seepat.inference.xai_paragraphs import human_summary
 
@@ -29,6 +30,8 @@ STAGES = {"preparation": "prepared", "inference": "result", "explanation": "expl
 REPORT_VIEWS = {"Video summary": "plain", "Evidence details": "technical"}
 INK, NAVY, ACCENT = "#203247", "#17324d", "#137d88"
 OUTCOME_COLORS = {"authentic": "#22634b", "manipulated": "#98442e", "not_evaluated": "#667485"}
+VERDICT_LABELS = {"authentic": "Authentic (real)", "manipulated": "Manipulated (fake)", "not_evaluated": "Not evaluated"}
+FINAL = {"complete", "failed", "interrupted"}
 logger = logging.getLogger(__name__)
 
 
@@ -273,7 +276,7 @@ class Desktop:
         self.root, self.store = root, store
         self.dialog, self.message = filedialog, messagebox
         self.current = self.source = self.selected = self.output = None
-        self.timer = None
+        self.timer = self.echo = None
         root.title("DS13 - 4CSD - SeePAT")
         root.geometry("1120x680")
         root.minsize(940, 600)
@@ -423,7 +426,11 @@ class Desktop:
             self.status.set("Checking the selected source and frozen settings...")
             self.root.update_idletasks()
             item = self.current if resume else self.store.create(self.selected, "personal-recording")
+            log = self.store.folder(item["id"]) / "console.log"
+            offset = log.stat().st_size if log.exists() else 0
             self.store.start(item["id"])
+            self.echo = (item["id"], offset)
+            print(f"\nSeePAT: analyzing {item['filename']} in {log.parent}", flush=True)
             self.selected = None
             self.load_job(item["id"])
             self.refresh_saved()
@@ -487,8 +494,7 @@ class Desktop:
         self.status.set("Saved example report - no new analysis" if item.get("saved") else
                         f'{status.capitalize()} | {p.get("phase") or "Local workflow"}' + (f" | {done}/{total}" if total else ""))
         report = item.get("report")
-        labels = {"authentic": "Authentic (real)", "manipulated": "Manipulated (fake)", "not_evaluated": "Not evaluated"}
-        self.verdict.configure(text=labels[report["verdict"]] if report else
+        self.verdict.configure(text=VERDICT_LABELS[report["verdict"]] if report else
             "Processing stopped" if status in {"failed", "interrupted"} else "No result yet",
             foreground=OUTCOME_COLORS.get((report or {}).get("verdict"), INK))
         self.render_text()
@@ -523,12 +529,42 @@ class Desktop:
             self.root.after_cancel(self.timer)
         try:
             # Keep an own-video worker from replacing the saved example on screen.
-            if self.mode.get() == "Your video" and self.current and self.current["status"] not in {"complete", "failed", "interrupted"}:
+            if self.mode.get() == "Your video" and self.current and self.current["status"] not in FINAL:
                 self.load_job(self.current["id"])
             self.buttons()
         except (OSError, ValueError, KeyError) as error:
             self.status.set(str(error))
+        try:
+            self.echo_worker()
+        except (OSError, ValueError, KeyError):
+            self.echo = None  # Terminal mirroring is best-effort; the window still shows the result.
         self.timer = self.root.after(1000, self.poll)
+
+    def echo_worker(self):
+        """Mirror the launched worker's log in the terminal that opened this window."""
+        if not self.echo:
+            return
+        identity, offset = self.echo
+        folder = self.store.folder(identity)
+        done = self.store.worker_state(folder)["status"] in FINAL  # Checked first so no last line is missed.
+        with (folder / "console.log").open("rb") as log:
+            log.seek(offset)
+            data = log.read()
+        if not done:
+            data = data[:data.rfind(b"\n") + 1]  # Whole lines only while the worker is writing.
+        self.echo = (identity, offset + len(data))
+        print(data.decode("utf-8", "replace").replace("\r\n", "\n"), end="", flush=True)
+        if done:
+            self.echo = None
+            item = self.store.snapshot(identity)
+            report = item.get("report")
+            if report:
+                score = "" if report["video_score"] is None else \
+                    f" (score {report['video_score']:.4f}, cutoff {report['threshold']:.4f})"
+                print(f"SeePAT result: {VERDICT_LABELS[report['verdict']]}{score} | report: {folder / 'run/explanation'}",
+                      flush=True)
+            else:
+                print(f"SeePAT stopped ({item['status']}): {item['error']} | log: {folder / 'console.log'}", flush=True)
 
     def open_reports(self):
         try:
@@ -566,6 +602,7 @@ def main():
     os.chdir(ROOT)
     store = Analyses(config=read(args.config))
     if args.worker:
+        compact_progress()
         return run_worker(store, args.worker)
     import tkinter as tk
 

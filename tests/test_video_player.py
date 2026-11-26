@@ -164,6 +164,12 @@ def check_playback(path):
         widget.seek(1.5)
         until(lambda: widget.point >= 1.5 and widget.frame is not None)
         assert widget.point < 1.8
+        # After a seek, playback stays real-time with audio on the same clock (was ~0.5x, audio from 0:00).
+        start, wall = widget.point, time.monotonic()
+        until(lambda: time.monotonic() - wall >= .8)
+        rate = (widget.point - start) / (time.monotonic() - wall)
+        assert .75 <= rate <= 1.3, f'playback rate after seek {rate:.2f}x'
+        assert abs(widget.player.get_pts() - widget.point) < .25, 'audio clock left the video after seek'
         widget.toggle()
         assert widget.player.get_pause()
         widget.close()

@@ -6,9 +6,14 @@ import argparse
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 DEFAULT_CONFIG = "configs/local_inference.yaml"
+# Frozen configs pin src/seepat/live_progress.py by hash, so the one-line tracker is
+# swapped in when a command starts instead of editing that file.
+BOOT = ("import runpy, sys; from scripts.seepat_cli import compact_progress; compact_progress(); "
+        "runpy.run_module(sys.argv.pop(1), run_name='__main__', alter_sys=True)")
 
 COMMANDS = {
     "ui": ("scripts.demo_ui", "Open the native single-video desktop interface"),
@@ -27,6 +32,29 @@ COMMANDS = {
     "data": ("seepat.cli", "Dataset inventory, sampling, and extraction tools"),
     "pia": ("scripts.pia_assessment", "Run/resume PIA on the fixed 1,000 external requests"),
 }
+
+
+def progress_line(record):
+    """One-line replacement for live_progress.format_live_progress."""
+    if record.get("status") == "unavailable":
+        return str(record["message"])
+    done, total = int(record.get("finished", 0)), int(record.get("total", 0))
+    stamp = time.strftime("%H:%M:%S", time.localtime(float(record.get("updated_at", time.time()))))
+    parts = [f"{stamp} {record['status']}"]
+    if int(record.get("jobs_total", 1)) > 1:
+        parts.append(f"job {record.get('job_index', 0)}/{record['jobs_total']} {record.get('job', '')}")
+    parts.append(str(record.get("phase") or "starting"))
+    if total:
+        parts.append(f"{done}/{total} ({min(1.0, done / total):.0%})")
+    if record.get("error"):
+        parts.append(str(record["error"]))
+    return " | ".join(parts)
+
+
+def compact_progress():
+    from seepat import live_progress
+
+    live_progress.format_live_progress = progress_line
 
 
 def command_args(command, args):
@@ -79,7 +107,8 @@ def main(argv=None):
             [
                 str(python) if python.is_file() else sys.executable,
                 "-u",
-                "-m",
+                "-c",
+                BOOT,
                 module,
                 *command_args(args.command, args.args),
             ],

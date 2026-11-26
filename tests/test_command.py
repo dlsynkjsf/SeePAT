@@ -76,7 +76,17 @@ def test_ui_dispatch_keeps_server_options_and_never_selects_a_training_command(m
     monkeypatch.setattr(subprocess, "run", lambda args, **kwargs:
                         seen.append(args) or SimpleNamespace(returncode=0))
     assert cli.main(["ui", "--config", "custom-ui.json"]) == 0
-    assert seen[0][-4:] == ["-m", "scripts.demo_ui", "--config", "custom-ui.json"]
+    assert seen[0][-3:] == ["scripts.demo_ui", "--config", "custom-ui.json"]
+
+
+def test_tracker_is_one_line_without_editing_the_pinned_formatter(monkeypatch):
+    from seepat import live_progress
+
+    monkeypatch.setattr(live_progress, "format_live_progress", live_progress.format_live_progress)
+    cli.compact_progress()
+    line = live_progress.format_live_progress({"status": "running", "jobs_total": 1, "phase": "train epoch 3/10",
+        "finished": 4, "total": 8, "elapsed_seconds": 5, "eta_seconds": 5, "current_item": "video-1"})
+    assert "\n" not in line and line.endswith(" running | train epoch 3/10 | 4/8 (50%)")
 
 
 @pytest.mark.parametrize("script,args,expected", [
